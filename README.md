@@ -122,9 +122,8 @@ One thing to watch: send each coin **only on the network listed next to it**. Co
 
 | Coin | Network | Address |
 |---|---|---|
-| USDT | TRON (TRC20) | `TKM87mEXhUpEBzqvNxs1qjM4EddX6VMXmw` |
-| Gram | TON | `UQDfjT-h4ENIrt_Sq5-zBy9TvhckniwSLCkS7zIVX4fVSaFw` |
-| Bitcoin (BTC) | Bitcoin | `bc1qc4cgy5etuwj2375c5zqma7xmjtk59s5s49rfp5` |
+| USDT / TRX | TRON (TRC20) | `TC9mneBoe71LCeUukWVCctgnP5FLGzQjY4` |
+| Bitcoin (BTC) | Bitcoin | `bc1qah4d07e57xr53n5n9vuxf55rx5p4423tw22frm` |
 
 A ⭐ on the repo, a bug report with its log, or telling a friend who runs servers helps just as much.
 

@@ -9,20 +9,12 @@ required, and nothing in Wormhole depends on it.
 Send each coin **only on the network shown next to it**. A coin sent on another network
 cannot be recovered. Scan the code with your wallet app, or copy the address under it.
 
-**USDT** on the **TRON network (TRC20)**
+**USDT or TRX** on the **TRON network (TRC20)**
 
-![QR code of the USDT (TRC20) address](images/qr-usdt-trc20.svg)
-
-```text
-TKM87mEXhUpEBzqvNxs1qjM4EddX6VMXmw
-```
-
-**Gram (TON)** on the **TON network**
-
-![QR code of the Gram (TON) address](images/qr-ton.svg)
+![QR code of the TRON (TRC20) address](images/qr-tron.svg)
 
 ```text
-UQDfjT-h4ENIrt_Sq5-zBy9TvhckniwSLCkS7zIVX4fVSaFw
+TC9mneBoe71LCeUukWVCctgnP5FLGzQjY4
 ```
 
 **Bitcoin (BTC)** on the **Bitcoin network**
@@ -30,7 +22,7 @@ UQDfjT-h4ENIrt_Sq5-zBy9TvhckniwSLCkS7zIVX4fVSaFw
 ![QR code of the Bitcoin (BTC) address](images/qr-btc.svg)
 
 ```text
-bc1qc4cgy5etuwj2375c5zqma7xmjtk59s5s49rfp5
+bc1qah4d07e57xr53n5n9vuxf55rx5p4423tw22frm
 ```
 
 Check the first and the last characters of the address you pasted against the ones above

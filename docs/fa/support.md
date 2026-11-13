@@ -8,20 +8,12 @@
 
 هر ارز را **فقط روی شبکه‌ای** بفرستید که کنارش نوشته شده است. ارزی که روی شبکهٔ دیگری فرستاده شود برگردانده نمی‌شود. کد را با برنامهٔ کیف پول اسکن کنید، یا آدرس زیر آن را کپی کنید.
 
-**USDT** روی **شبکهٔ ترون (TRC20)**
+**USDT یا TRX** روی **شبکهٔ ترون (TRC20)**
 
-![کد QR آدرس USDT (TRC20)](../images/qr-usdt-trc20.svg)
-
-```text
-TKM87mEXhUpEBzqvNxs1qjM4EddX6VMXmw
-```
-
-**گرم (TON)** روی **شبکهٔ TON**
-
-![کد QR آدرس گرم (TON)](../images/qr-ton.svg)
+![کد QR آدرس ترون (TRC20)](../images/qr-tron.svg)
 
 ```text
-UQDfjT-h4ENIrt_Sq5-zBy9TvhckniwSLCkS7zIVX4fVSaFw
+TC9mneBoe71LCeUukWVCctgnP5FLGzQjY4
 ```
 
 **بیت‌کوین (BTC)** روی **شبکهٔ بیت‌کوین**
@@ -29,7 +21,7 @@ UQDfjT-h4ENIrt_Sq5-zBy9TvhckniwSLCkS7zIVX4fVSaFw
 ![کد QR آدرس بیت‌کوین (BTC)](../images/qr-btc.svg)
 
 ```text
-bc1qc4cgy5etuwj2375c5zqma7xmjtk59s5s49rfp5
+bc1qah4d07e57xr53n5n9vuxf55rx5p4423tw22frm
 ```
 
 پیش از ارسال، چند نویسهٔ اول و آخر آدرسی را که کپی کرده‌اید با آدرس بالا مقایسه کنید.
