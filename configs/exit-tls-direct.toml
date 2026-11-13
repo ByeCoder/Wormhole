@@ -1,0 +1,20 @@
+# Exit side, direct mode, plain TLS. Pair: entry-tls-direct.toml. The certificate is made
+# as for exit-wss-direct.toml (or use a real one, from Let's Encrypt).
+role = "exit"
+mode = "direct"
+profile = "balanced"
+
+[tunnel]
+transport = "wss"
+listen = "0.0.0.0:443"
+token = "CHANGE-ME-run-wormhole-token"
+
+[tunnel.ws]
+mode = "tls"
+
+[tunnel.tls]
+cert = "/etc/wormhole/cert.pem"
+key = "/etc/wormhole/key.pem"
+
+[log]
+level = "info"

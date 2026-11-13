@@ -1,0 +1,23 @@
+# Exit side (abroad), direct mode, behind a CDN, with HTTPUpgrade. Pair:
+# entry-httpupgrade-cdn.toml. For a CDN that talks plain HTTP to the origin, use
+# transport = "ws" on both sides and drop [tunnel.tls].
+role = "exit"
+mode = "direct"
+profile = "balanced"
+
+[tunnel]
+transport = "wss"
+listen = "0.0.0.0:443"
+token = "CHANGE-ME-run-wormhole-token"
+
+[tunnel.ws]
+mode = "httpupgrade"
+path = "/api/v1/upload"            # every other path gets nginx's 404 page
+host = "tunnel.example.com"
+
+[tunnel.tls]
+cert = "/etc/wormhole/origin.pem"
+key = "/etc/wormhole/origin.key"
+
+[log]
+level = "info"

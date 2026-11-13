@@ -1,0 +1,110 @@
+# اسکریپت مدیر
+
+[English](../manager.md) · **فارسی**
+
+`scripts/wormhole.sh` کرم‌چاله و [پنل وب](panel.md) را روی یک سرور لینوکس با systemd نصب می‌کند و یک سرور را به پنل وصل می‌کند. بعد از اولین اجرا، دستور `wormhole-manager` هم همین را انجام می‌دهد.
+
+**تانل‌ها اینجا ساخته نمی‌شوند.** سرورها، تانل‌ها، شبکه‌های خصوصی، پشتیبان‌گیری و به‌روزرسانی سرورهای دیگر، همه در پنل وب انجام می‌شوند. کار مدیر فقط این است که کرم‌چاله را روی سرور بگذارد و پنل را راه بیندازد؛ از آن به بعد در مرورگر کار می‌کنید.
+
+## نصب
+
+با دسترسی root، روی هر سرور:
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/ByeCoder/Wormhole/main/scripts/wormhole.sh)
+```
+
+بار اول روی یک سرور، خودش هستهٔ کرم‌چاله را نصب می‌کند و بعد می‌پرسد این سرور برای چه کاری است: فقط هسته (تانل‌ها از پنلی روی سرور دیگر ساخته می‌شوند)، پنل وب هم همین‌جا، یا اتصال به پنلی که از قبل هست. از آن به بعد هر بار منویی باز می‌شود که بالایش نام سرور و آدرس‌های IPv4 و IPv6 آن است و زیرش آنچه اینجا اجرا می‌شود: هسته، پنل وب و agent، هر کدام با یک نقطهٔ سبز وقتی در حال اجرا هستند.
+
+روی ترمینال با **کلیدهای جهت** (یا `j` و `k`) جابه‌جا شوید و **Enter** بزنید. یک عدد مستقیم به آیتمش می‌پرد (`1` و بعد `0` به ۱۰ می‌رسد) و `q` یا Esc منو را می‌بندد. خطی که زیر فهرست است می‌گوید آیتم انتخاب‌شده چه می‌کند. هر آیتم روی یک صفحهٔ پاک‌شده باز می‌شود، با عنوان بالایش، و با «Press any key» تمام می‌شود؛ Ctrl+C در آن شما را به منو برمی‌گرداند. پرسش‌هایی که چند گزینه دارند (مثلاً با چه راهی وارد پنل شوید، کدام لاگ) هم فهرستی هستند که با همان کلیدها در آن حرکت می‌کنید. بدون ترمینال (در pipe یا اسکریپت) منو و پرسش‌ها شماره‌دار می‌شوند و خط‌به‌خط خوانده می‌شوند.
+
+| | |
+|---|---|
+| **۱** نصب یا به‌روزرسانی کرم‌چاله | CPU را تشخیص می‌دهد (x86_64، aarch64 یا armv7)، آخرین نسخه را می‌گیرد، SHA-256 و امضایش را می‌سنجد و `wormhole`، `wormhole-panel`، unitهای systemd و دستور `wormhole-manager` را نصب می‌کند |
+| **۲** وضعیت و آدرس‌ها | آنچه روی این سرور اجرا می‌شود، آدرس‌های سرور و آدرس پنل |
+| **۳** تا **۸** پنل وب | نصب پنل روی این سرور، ساختن لینک ورود، رمز مدیر، عوض کردن دامنه یا IP و گواهی‌اش (از Let's Encrypt، یا فایل‌های گواهی‌ای که خودتان دارید)، عوض کردن پورت پنل، حذف پنل |
+| **۹** و **۱۰** agent | وصل کردن این سرور به یک پنل با کد پیوستن، یا جدا کردنش |
+| **۱۱** لاگ زنده | دنبال کردن لاگ پنل یا agent |
+| **۱۲** حذف کرم‌چاله | هرچه نصب کرده را متوقف و پاک می‌کند |
+
+اگر GitHub دانلودهایتان را محدود می‌کند (مثلاً سرورهای زیادی پشت یک آدرس هستند)، پیش از اجرای اسکریپت `GITHUB_TOKEN` را روی یک personal access توکن بگذارید. فقط برای برداشتن همین محدودیت استفاده می‌شود.
+
+راه‌های دیگر نصب:
+
+```bash
+wormhole-manager install --version v1.0.0        # a specific release
+wormhole-manager install --binary ./wormhole        # a binary you built yourself
+```
+
+## راه معمول
+
+۱. روی سروری که پنل را نگه می‌دارد، یک‌خطی را اجرا کنید و **۳** (نصب پنل وب) را بزنید. نشانی پنل و یک لینک ورود یک‌بارمصرف چاپ می‌شود.
+۲. لینک را در مرورگر باز کنید و وارد شوید. از اینجا به بعد در پنل کار کنید: [کار با پنل](using-the-panel.md).
+۳. روی هر سرور دیگر یک‌خطی را اجرا کنید، **۹** (وصل شدن به یک پنل) را بزنید و کد پیوستنی را که پنل داده بچسبانید (سرورها، افزودن سرور). آن سرور حالا در پنل دیده می‌شود.
+۴. در پنل، بین هر دو سرورتان تانل بسازید.
+
+## دستورها
+
+منو و دستورها یک کار را می‌کنند:
+
+```bash
+wormhole-manager install [--version vX.Y.Z] [--binary PATH]   # Wormhole (and the panel program)
+wormhole-manager update [--version vX.Y.Z]                    # a new release; what runs is restarted
+wormhole-manager uninstall [--yes]                            # --yes also deletes the configs
+
+wormhole-manager panel install [--port N] [--host H] [--name NAME]   # the panel on this server: address, certificate, a login link; asks what to call this server (default: its host name)
+wormhole-manager panel name [NAME]                    # rename this server in the panel
+wormhole-manager panel link [--host H]                 # another one-time login link
+wormhole-manager panel password [--stdin | --random]  # a new admin password (asked twice, hidden)
+wormhole-manager panel status | logs                   # the service, its address / follow the log
+wormhole-manager panel cert [--domain D | --ip A]      # a new domain or IP address, with its certificate
+wormhole-manager panel cert --cert-file F --key-file K # a certificate of your own (asked for in the menu too)
+wormhole-manager panel port [N]                        # the port the panel opens on (asked without N)
+wormhole-manager panel heal                            # a certificate for this server's new IP address (a timer runs it)
+wormhole-manager panel uninstall [--yes]
+
+wormhole-manager --agent kz1_... [--yes]               # connect this server to a panel (the code is from the panel)
+wormhole-manager agent status | logs | remove
+wormhole-manager status                                # what runs here and this server's addresses
+```
+
+سروری که agent دارد را هم می‌شود با یک کد تازه به پنل دیگری وصل کرد. اسکریپت همین را به شما می‌گوید، می‌پرسد (با `--yes` پرسیده نمی‌شود)، agent قبلی را برمی‌دارد و agent تازه را جایش راه می‌اندازد. پنل قبلی تا وقتی خودتان آنجا حذفش نکنید، این سرور را آفلاین نشان می‌دهد.
+
+## به‌روزرسانی و حذف
+
+با باز کردن منو (و با `wormhole-manager status`) اسکریپت دنبال نسخهٔ تازه می‌گردد. اگر نسخه‌ای منتشر شده باشد و هسته، پنل یا agent این سرور قدیمی‌تر باشند، می‌گوید کدام‌ها و می‌پرسد همه همین حالا به‌روز شوند یا نه. وقتی با `--agent CODE` به پنل وصل می‌شوید، اگر برنامهٔ این سرور قدیمی باشد اول به‌روزش می‌کند، چون agent قدیمی ممکن است چیزی را که پنلِ جدیدتر می‌فرستد نپذیرد. با `WORMHOLE_NO_UPDATE_CHECK=1` این جست‌وجو خاموش می‌شود. `update` اسکریپت `wormhole-manager` همان نسخه‌ای را که نصب کرده هم می‌گیرد (مگر این‌که از فایل‌های خودتان نصب کنید).
+
+`install` و `update` **امضای** نسخه را می‌سنجند و SHA-256 آن را هم. از نسخهٔ ۰٫۱۱ به بعد نسخه‌ای که امضای معتبر نداشته باشد نصب نمی‌شود؛ نسخه‌های قدیمی‌تر اصلاً امضا ندارند و با یک هشدار پذیرفته می‌شوند. `update` هرچه در حال اجراست دوباره راه می‌اندازد (همهٔ تانل‌ها، پنل و agent) تا برنامهٔ تازه را به کار بگیرند. وقتی سروری به پنل وصل شد، پنل خودش می‌تواند آن سرور (و خودش) را با یک دکمه به‌روز کند: [به‌روزرسانی از پنل](panel.md#بهروزرسانی).
+
+خود اسکریپت مدیر هم به سه شکل به‌روز می‌شود:
+
+- پنل و agent هر بار که بالا می‌آیند، اگر `wormhole-manager` نباشد یا با نسخهٔ خودشان فرق داشته باشد، اسکریپت نسخهٔ خودشان را سر جایش می‌گذارند. به‌روزرسانی از پنل آن‌ها را ری‌استارت می‌کند، پس سروری که فقط از پنل به‌روز می‌شود منوی نسخهٔ تازه‌اش را هم می‌گیرد.
+- `update` (و گزینهٔ «نصب یا به‌روزرسانی» در منو) `wormhole-manager` همان نسخه‌ای را که نصب کرده می‌گیرد (اگر آن نسخه هنوز tag نداشته باشد، از main) و اگر جای همان اسکریپتی را بگیرد که منو با آن باز است، منو دوباره با نسخهٔ تازه باز می‌شود. اگر دانلود نشود می‌گوید و اسکریپت قبلی می‌ماند.
+- نسخه‌ای از اسکریپت که از یک فایل اجرا کنید (مثلاً اسکریپت تازه‌ای که روی سرور کپی کرده‌اید) همان لحظه به‌عنوان `wormhole-manager` نصب می‌شود، حتی اگر هسته به‌روز باشد. فایل را یک بار اجرا کنید تا از آن به بعد دستور `wormhole-manager` همین اسکریپت تازه باشد.
+
+برای گرفتن دستی:
+
+```bash
+curl -fsSL -o /usr/local/bin/wormhole-manager \
+    https://raw.githubusercontent.com/ByeCoder/Wormhole/main/scripts/wormhole.sh
+chmod +x /usr/local/bin/wormhole-manager
+```
+
+`uninstall` کرم‌چاله را کامل از سرور برمی‌دارد: همهٔ تانل‌ها، agent (سرویس، هویت و لینک‌های شبکهٔ خصوصی‌ای که ساخته)، پنل وب اگر باشد، و خود برنامه‌ها را. اول فهرست چیزهایی را که پاک می‌شود می‌گوید و یک بار می‌پرسد؛ بعد می‌پرسد کانفیگ تانل‌ها و داده‌های پنل (توکن‌ها، سرورها، گواهی) هم پاک شوند یا نه. `--yes` به همه بله می‌گوید. سروری که به پنل وصل بوده تا وقتی آن را در پنل حذف نکنید، آنجا آفلاین دیده می‌شود. `agent remove` فقط agent را برمی‌دارد.
+
+## لاگ‌ها
+
+لاگ‌های کرم‌چاله در journal می‌روند و هر خط اولویت systemd خودش را دارد. پنل آن‌ها را در صفحهٔ لاگ نشان می‌دهد. روی خود سرور:
+
+```bash
+journalctl -u wormhole@main -f                 # follow one tunnel
+journalctl -u wormhole@main -p warning         # only warnings and errors
+journalctl -u wormhole-panel -f                # the panel
+journalctl -u wormhole-agent -f                # the agent
+```
+
+## خوب است بدانید
+
+- root، systemd و `curl` یا `wget` لازم است.
+- تانل‌ها کانفیگ‌های معمولی کرم‌چالهند، در `/etc/wormhole/<name>.toml`، و سرویس `wormhole@<name>` اجرایشان می‌کند؛ agent پنل آن‌ها را می‌نویسد. می‌توانید بخوانیدشان و [مرجع پیکربندی](configuration.md) هر تنظیم را توضیح می‌دهد، ولی تغییرها را در پنل بدهید تا هر دو سمت هم‌گام بمانند.
+- unit سرویس `systemd/wormhole@.service` است.

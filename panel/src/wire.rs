@@ -1,0 +1,753 @@
+//! What the panel and its agents say to each other.
+//!
+//! A request is one mux stream: the panel opens it with the request as JSON in the open
+//! bytes, the agent answers with one JSON document and finishes the stream. The panel is
+//! always the one that asks; the requests are a fixed list, and none of them runs a
+//! command the panel names: there is no remote shell.
+
+use serde::{Deserialize, Serialize};
+
+/// Largest request the panel sends (the open bytes of a stream hold 64 KiB). A tunnel with
+/// the most ports the wizard allows (200 forwards) is 15 KB with IPv4 addresses and more
+/// than 20 KB with IPv6 ones.
+pub const MAX_REQUEST: usize = 60 * 1024;
+/// Largest answer the panel reads.
+pub const MAX_REPLY: usize = 4 * 1024 * 1024;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum Request {
+    /// Who are you? `challenge` is random; a registered agent proves its key over it.
+    Hello { challenge: String },
+    /// A new agent's identity: keep it and use it from now on.
+    Enroll { id: String, key: String },
+    /// CPU, memory, network, uptime, load.
+    Health,
+    /// The tunnels on this server (the `/etc/wormhole/*.toml` files) and their state.
+    Tunnels,
+    /// Is this tunnel spec valid here, and are its ports free?
+    TunnelCheck { spec: Spec },
+    /// Write the tunnel's config from a spec (the agent renders the file).
+    TunnelPut { spec: Spec },
+    /// One tunnel's spec, without its token.
+    TunnelGet { name: String },
+    /// Stop it, remove its config.
+    TunnelDelete { name: String },
+    /// Put back the config the last `TunnelPut` replaced (an edit that is undone). Since
+    /// 2.7.0.
+    TunnelRevert { name: String },
+    /// `start`, `stop`, `restart`, `enable` or `disable` the tunnel's service.
+    TunnelCtl { name: String, action: String },
+    /// The listening ports of this server and who owns them.
+    Ports,
+    /// The last lines of a tunnel's log.
+    Logs { name: String, lines: u32 },
+    /// Run the entry side's speed test.
+    Speedtest {
+        name: String,
+        seconds: u32,
+        streams: u32,
+        udp: bool,
+    },
+    /// Get a Let's Encrypt certificate for a domain (or a public IPv4 address) on this
+    /// server, for a wss tunnel that listens here. Runs `wormhole-manager tunnel-cert`.
+    TunnelCert {
+        domain: String,
+        #[serde(default)]
+        email: Option<String>,
+    },
+    /// Start the entry side's speed test in the background; its progress is read with
+    /// [`Request::SpeedtestPoll`] while it runs.
+    SpeedtestStart {
+        name: String,
+        seconds: u32,
+        streams: u32,
+        udp: bool,
+    },
+    /// Stop a started speed test now (its test streams end within half a second).
+    SpeedtestStop { id: String },
+    /// The progress lines of a started speed test after the first `after`, and the report
+    /// once it is done.
+    SpeedtestPoll { id: String, after: u32 },
+    /// Make (or make again) the GRE interface of a private network link.
+    NetUp { net: NetSpec },
+    /// Remove a link's interface.
+    NetDown { name: String },
+    /// The panel's whole list of this server's links: make the ones that are missing or
+    /// changed, remove the ones that are not in it (sent when an agent connects).
+    NetSync { links: Vec<NetSpec> },
+    /// Ping the far end of a link across it.
+    NetPing { name: String },
+    /// Whether GRE can be made here, and the state of this server's links.
+    NetStatus,
+    /// The path MTU to `remote` (another server's public address), measured with pings
+    /// that may not be fragmented. Since 2.7.0.
+    NetPmtu { remote: String },
+    /// Listen for one benchmark test session ([`wormhole::bench`]) over `transport` with the
+    /// tunnel `profile`, on `port` of every IPv4 address, or of the address `bind` (this
+    /// server's IPv6 address: a listener of its own beside the IPv4 one on the same port)
+    /// (another free port when that one is taken; 0: any). The answer says the port. The
+    /// listener goes away when its session ends, or after `wait_ms` if nobody comes.
+    BenchListen {
+        token: String,
+        transport: String,
+        profile: String,
+        port: u16,
+        wait_ms: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bind: Option<String>,
+    },
+    /// Dial a benchmark listener at `addr` and measure the link: its handshake, round trips
+    /// for `ping_ms`, and with `seconds` above 0 the rate each way for that long. `sni`: the
+    /// server name a `wss` link sends.
+    BenchDial {
+        addr: String,
+        token: String,
+        transport: String,
+        profile: String,
+        ping_ms: u32,
+        seconds: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sni: Option<String>,
+    },
+    /// A release is about to be sent (its three files and their sizes).
+    UpdateBegin {
+        version: String,
+        files: Vec<UpdateFile>,
+    },
+    /// One piece of one of the files: a base64 chunk at an offset.
+    UpdateChunk {
+        version: String,
+        name: String,
+        offset: u64,
+        data: String,
+    },
+    /// Everything has been sent: check it, unpack it and swap the programs.
+    UpdateApply { version: String },
+}
+
+/// A file of a release that is being sent to an agent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdateFile {
+    pub name: String,
+    pub size: u64,
+}
+
+/// One private network link on this server, as data. The
+/// agent checks every field before it runs anything.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NetSpec {
+    /// `kz-` and up to eight small letters or digits.
+    pub name: String,
+    /// This server's public address, and the other server's.
+    pub local: String,
+    pub remote: String,
+    /// Tells two GRE tunnels between the same two addresses apart; for VXLAN it is the VNI,
+    /// which no two VXLAN links of one server share.
+    pub key: u32,
+    /// This end's private address, the other end's, and the prefix length (30 or 31).
+    pub address: String,
+    pub peer: String,
+    pub prefix: u8,
+    pub mtu: u32,
+    /// GRE, or VXLAN over UDP `port`. Both are left out for GRE: an agent older than VXLAN
+    /// refuses fields it does not know, so it still takes a GRE link and refuses a VXLAN
+    /// one (instead of making GRE of it).
+    #[serde(default, skip_serializing_if = "LinkKind::is_gre")]
+    pub kind: LinkKind,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub port: u16,
+}
+
+fn is_zero(port: &u16) -> bool {
+    *port == 0
+}
+
+/// How the links of a private network are made.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LinkKind {
+    /// IP protocol 47.
+    #[default]
+    Gre,
+    /// Ethernet frames in UDP datagrams.
+    Vxlan,
+}
+
+impl LinkKind {
+    pub fn is_gre(&self) -> bool {
+        *self == Self::Gre
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Gre => "gre",
+            Self::Vxlan => "vxlan",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<Self> {
+        match text {
+            "gre" => Some(Self::Gre),
+            "vxlan" => Some(Self::Vxlan),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NetIface {
+    pub name: String,
+    pub address: String,
+    pub exists: bool,
+    pub up: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NetStatus {
+    /// This server can make GRE interfaces (root, the `ip_gre` module, no container limit).
+    pub gre: bool,
+    /// Why not, when it cannot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// This server can make VXLAN interfaces (the `vxlan` module). An agent older than
+    /// VXLAN does not say, which reads as no.
+    #[serde(default)]
+    pub vxlan: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vxlan_reason: Option<String>,
+    /// The same between IPv6 addresses (`ip6gre`, and VXLAN over IPv6). An agent before
+    /// 2.7.0 does not say, which reads as no.
+    #[serde(default)]
+    pub gre6: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gre6_reason: Option<String>,
+    #[serde(default)]
+    pub vxlan6: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vxlan6_reason: Option<String>,
+    #[serde(default)]
+    pub links: Vec<NetIface>,
+}
+
+/// The answer to [`Request::NetPmtu`]: the largest packet that got through whole, or none
+/// when not even 1280 bytes did (ICMP filtered on the way, most likely).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PmtuReply {
+    #[serde(default)]
+    pub mtu: Option<u32>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PingReply {
+    pub ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rtt_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// A tunnel's mux settings (`[tunnel.mux]`): every one is optional, and what is left out
+/// keeps the profile's value.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MuxSpec {
+    /// Off for `ws`, `wss` and `kcp` when a tunnel should not multiplex (`tcp` is the
+    /// transport that is off by itself; `tcpmux` and `auto` cannot be turned off).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connections: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_streams: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_window: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_lifetime_secs: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ping_interval_secs: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coalesce: Option<bool>,
+    /// `auto` only: the dialing side keeps sessions over tcpmux, kcp and ws at the same
+    /// time and spreads connections over them (agents from [`crate::pair::SPREAD_SINCE`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spread: Option<bool>,
+}
+
+impl MuxSpec {
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// A `paqet` tunnel's `[tunnel.kcp]`: the native encrypted KCP wire's own tuning. Every
+/// field is optional, and what is left out keeps the profile's value. The table is only
+/// written for `paqet`, and only an agent of 2.8.0-beta.1 or newer reads it.
+///
+/// This is data only: whether raw TCP, the kernel's RST suppression and the listening
+/// port are ready is a runtime check on the servers (see `manage::wanted_ports`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KcpSpec {
+    /// `normal`, `fast`, `fast2`, `fast3` or `manual`. Left out: the profile's preset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+    /// `mode = "manual"` only; the other modes set these.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nodelay: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interval_ms: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resend: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub no_congestion: Option<bool>,
+    /// In packets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub send_window: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recv_window: Option<u32>,
+    /// KCP packet size (its 24-byte header included).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mtu: Option<usize>,
+    /// Reed-Solomon FEC: parity packets per group of data packets. Both left out keep the
+    /// profile's default; both 0 turn FEC off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fec_data: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fec_parity: Option<usize>,
+    /// UDP flows take the datagram path beside KCP. Left out: on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub datagrams: Option<bool>,
+}
+
+impl KcpSpec {
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// A `spoof` tunnel's `[tunnel.spoof]` table for one side: its forged source(s), the
+/// peer's real address, and optional filters. Written only for `transport = "spoof"`;
+/// only an agent of 1.0.0 or newer reads it. The two sides differ (each has its own
+/// forged source and the other's real address), so this is per-side, unlike `[tunnel.kcp]`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SpoofSpec {
+    /// This side's forged source address (one). Mutually exclusive with `spoof_ips`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spoof_ip: Option<String>,
+    /// This side's forged source addresses, used round-robin.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub spoof_ips: Vec<String>,
+    /// The source the peer forges (receive filter only). Left out: accept any source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_spoof_ip: Option<String>,
+    /// The peer's real address, where replies go. Required on the listening side.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_ip: Option<String>,
+    /// The forged TCP source port. Left out: the tunnel's real port.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+}
+
+impl SpoofSpec {
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// What a tunnel is, as data: everything the manager's `add` takes, without free text
+/// going into the file. The agent turns it into the config.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Spec {
+    pub name: String,
+    pub role: String,
+    pub mode: String,
+    pub transport: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub listen: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote: Option<String>,
+    /// Sent when a tunnel is made or its token changes; `None` keeps the one in the file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pool: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ws_path: Option<String>,
+    /// `tunnel.ws.mode` (`httpupgrade`, or `tls` for wss); left out: WebSocket frames. An
+    /// agent older than this field refuses a spec that has it, rather than making a
+    /// tunnel that cannot talk to its other side.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ws_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ws_host: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls_sni: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls_pin: Option<String>,
+    /// A listening wss side: the certificate and key files of a real certificate (made by
+    /// [`Request::TunnelCert`], under `/etc/letsencrypt/live/`) instead of a self-signed one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls_cert: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls_key: Option<String>,
+    /// Mux settings; left out, the profile's apply.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mux: Option<MuxSpec>,
+    /// A `paqet` tunnel's `[tunnel.kcp]`; left out, the profile's values apply. Only an
+    /// agent of 2.8.0-beta.1 or newer reads it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kcp: Option<KcpSpec>,
+    /// A `spoof` tunnel's `[tunnel.spoof]` for this side. Only an agent of 1.0.0 or newer
+    /// reads it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spoof: Option<SpoofSpec>,
+    /// The cipher of the tunnel: `aes-256-gcm`, `chacha20-poly1305` or `none` (traffic in the
+    /// clear, authenticated only). Left out: `auto` (AES where the CPU has it, else ChaCha).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encryption: Option<String>,
+    /// A `quic` tunnel's `[tunnel.quic] obfs`: every UDP packet sealed with a key from the token,
+    /// so the traffic does not look like QUIC. Left out: off. Only an agent of 1.7 or newer
+    /// reads it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub quic_obfs: bool,
+    /// Entry side: `[tuning] max_conns_per_ip`. Left out: no limit. Only an agent of 2.4
+    /// or newer reads it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_conns_per_ip: Option<u32>,
+    /// Entry side: `[tuning] udp_max_flows`, UDP flows per rule. Left out: the default
+    /// (4096 from 2.6.0-beta.4). Only an agent of 2.6.0-beta.4 or newer reads it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub udp_max_flows: Option<u32>,
+    /// Entry side: the `proxy_protocol` (`v1` or `v2`) of every TCP forward rule, so the
+    /// target sees each user's address. Left out: off. Only an agent of 2.5 or newer reads
+    /// it; it is here and not on [`ForwardInfo`] because an older agent would drop an
+    /// unknown field there without a word.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy_protocol: Option<String>,
+    #[serde(default)]
+    pub forwards: Vec<ForwardInfo>,
+}
+
+/// Something that listens on a port of this server.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PortOwner {
+    /// `tcp` or `udp`.
+    pub proto: String,
+    pub addr: String,
+    pub port: u16,
+    /// The process name (`sshd`, `wormhole`), when it could be found.
+    pub process: Option<String>,
+    pub pid: Option<u32>,
+}
+
+/// The answer to `tunnel_put`: the certificate pin of a listening wss side, for the
+/// dialing side's config.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PutReply {
+    pub ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pin: Option<String>,
+}
+
+/// The answer to `tunnel_check`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CheckReply {
+    pub ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+    /// Ports the spec wants that something else already listens on.
+    #[serde(default)]
+    pub conflicts: Vec<PortOwner>,
+}
+
+/// The answer to `logs` and `speedtest`: text, or why there is none.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct TextReply {
+    pub ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub text: String,
+}
+
+/// The answer to [`Request::Speedtest`]: what was measured. An agent older than 1.2
+/// answers with `text` (the printed report) and no `report`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SpeedReply {
+    pub ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report: Option<wormhole::speedtest::Report>,
+}
+
+/// The answer to [`Request::TunnelCert`]: the files of the certificate, or why there are none.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CertReply {
+    pub ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cert: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+}
+
+/// The answer to [`Request::BenchListen`].
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct BenchListening {
+    pub ok: bool,
+    pub error: Option<String>,
+    pub port: u16,
+    /// The address it listens on, for a `bind` (an agent older than `bind` leaves it out: it
+    /// listened on IPv4 only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bound: Option<String>,
+}
+
+/// The answer to [`Request::BenchDial`]: what one test link measured.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct BenchMeasured {
+    pub ok: bool,
+    pub error: Option<String>,
+    /// The connection and its handshake, in milliseconds.
+    pub connect_ms: f64,
+    /// Round trips on an idle link.
+    pub latency: Option<wormhole::speedtest::Latency>,
+    /// With `seconds`: the rate each way, and round trips while data moves.
+    pub download_mbps: Option<f64>,
+    pub upload_mbps: Option<f64>,
+    pub loaded: Option<wormhole::speedtest::Latency>,
+    /// The server name it sent (an agent older than `sni` leaves it out: it sent none).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sni: Option<String>,
+}
+
+/// The answer to [`Request::SpeedtestStart`].
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct SpeedStarted {
+    pub ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub id: String,
+}
+
+/// The answer to [`Request::SpeedtestPoll`]: what a running speed test has said since the
+/// last poll (the lines are `wormhole::speedtest::run`'s progress lines), and, once `done`, the
+/// report or why there is none.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct SpeedPoll {
+    pub ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub lines: Vec<String>,
+    /// What to pass as `after` next time.
+    #[serde(default)]
+    pub next: u32,
+    #[serde(default)]
+    pub done: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report: Option<wormhole::speedtest::Report>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HelloReply {
+    /// Set once the agent is registered.
+    pub id: Option<String>,
+    /// `blake3::keyed_hash(key, challenge)` in hex, with the agent's key.
+    pub proof: Option<String>,
+    /// The join secret from the join code, until the agent is registered.
+    pub join: Option<String>,
+    pub hostname: String,
+    pub version: String,
+    pub arch: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Ack {
+    pub ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Health {
+    /// Busy share of all CPUs since the previous sample, 0-100.
+    pub cpu_pct: Option<f64>,
+    pub mem_total: Option<u64>,
+    pub mem_used: Option<u64>,
+    /// Bytes per second over the network cards, since the previous sample.
+    pub rx_bps: Option<f64>,
+    pub tx_bps: Option<f64>,
+    /// What the network cards moved since the server started (`collect::cards`). Left
+    /// out by agents older than 2.7.0-beta.2.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub net: Option<NetTotals>,
+    pub uptime_secs: Option<u64>,
+    pub load1: Option<f64>,
+    /// The IPv4 networks this server already has routes for (`172.17.0.0/16`, a cloud's
+    /// private network...), without the default route and Wormhole's own `kz-` links. Private
+    /// networks are never given a range that overlaps one.
+    #[serde(default)]
+    pub routes: Vec<String>,
+    /// This server's own IPv4 and IPv6 addresses: the ones its routes to the internet
+    /// leave from (a private one behind NAT; the panel shows the public one it sees).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ip4: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ip6: Option<String>,
+}
+
+/// Counters of a server's network cards, as `/proc/net/dev` has them (since boot, and
+/// reset when an interface is made again).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NetTotals {
+    pub rx_bytes: u64,
+    pub tx_bytes: u64,
+    pub rx_packets: u64,
+    pub tx_packets: u64,
+    /// Bytes of link-layer header in every packet counted (14 on Ethernet): the tunnels'
+    /// own counts, at the IP level, get them added to compare.
+    pub link_header: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForwardInfo {
+    pub listen: String,
+    pub target: String,
+    pub protocol: String,
+}
+
+/// One tunnel config on a server. Never carries the token.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TunnelInfo {
+    /// The file name without `.toml`, which is also the service (`wormhole@NAME`).
+    pub name: String,
+    pub role: String,
+    pub mode: String,
+    pub transport: String,
+    pub profile: String,
+    /// The tunnel's `encryption` setting (`auto`, `aes-256-gcm`, `chacha20-poly1305`, `none`);
+    /// empty from an agent that does not say.
+    #[serde(default)]
+    pub encryption: String,
+    pub listen: Option<String>,
+    pub remote: Option<String>,
+    pub forwards: Vec<ForwardInfo>,
+    /// systemd says the service runs. `None` where systemd is not there to ask.
+    pub active: Option<bool>,
+    /// From the running daemon's control socket (`wormhole status`).
+    pub status: Option<wormhole::stats::Status>,
+    /// Why the file could not be read, if it could not.
+    pub error: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_tunnel_with_the_most_ports_the_wizard_allows_fits_one_request() {
+        let spec = Spec {
+            name: "big".into(),
+            role: "entry".into(),
+            mode: "reverse".into(),
+            transport: "tcpmux".into(),
+            listen: Some("0.0.0.0:3080".into()),
+            token: Some("t".repeat(48)),
+            forwards: (0..200)
+                .map(|i| ForwardInfo {
+                    listen: format!("[::]:{}", 10000 + i),
+                    target: format!("[2001:db8:85a3::8a2e:370:7334]:{}", 10000 + i),
+                    protocol: "tcp+udp".into(),
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let size = serde_json::to_vec(&Request::TunnelPut { spec })
+            .unwrap()
+            .len();
+        assert!(size < MAX_REQUEST, "{size} bytes");
+        assert!(
+            size > 16 * 1024,
+            "the old limit would have refused it: {size} bytes"
+        );
+    }
+
+    #[test]
+    fn an_older_agent_is_not_sent_a_kcp_field_it_does_not_know() {
+        let spec = Spec {
+            name: "p".into(),
+            role: "entry".into(),
+            mode: "reverse".into(),
+            transport: "paqet".into(),
+            listen: Some("0.0.0.0:44300".into()),
+            token: Some("t".repeat(48)),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&spec).unwrap();
+        assert!(!json.contains("\"kcp\""), "{json}");
+        // A spec from an older agent (no kcp) still reads.
+        let old: Spec = serde_json::from_str(&json).unwrap();
+        assert_eq!(old.kcp, None);
+        // A paqet table survives, and an empty one serializes as nothing.
+        let tuned = Spec {
+            kcp: Some(KcpSpec {
+                mode: Some("manual".into()),
+                mtu: Some(1400),
+                ..Default::default()
+            }),
+            ..spec
+        };
+        let json = serde_json::to_string(&tuned).unwrap();
+        assert!(json.contains("\"kcp\":{"), "{json}");
+        let back: Spec = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.kcp.unwrap().mtu, Some(1400));
+    }
+
+    #[test]
+    fn requests_are_tagged_json() {
+        let json = serde_json::to_string(&Request::Hello {
+            challenge: "ab".into(),
+        })
+        .unwrap();
+        assert_eq!(json, r#"{"op":"hello","challenge":"ab"}"#);
+        assert_eq!(
+            serde_json::to_string(&Request::Health).unwrap(),
+            r#"{"op":"health"}"#
+        );
+        for text in [
+            r#"{"op":"health"}"#,
+            r#"{"op":"tunnels"}"#,
+            r#"{"op":"enroll","id":"a","key":"b"}"#,
+        ] {
+            serde_json::from_str::<Request>(text).unwrap();
+        }
+        // Only these operations exist: there is no way to name a command. (A request
+        // with extra fields is read as its operation and the extras are ignored; no
+        // operation takes a command, a path or a name.)
+        for text in [
+            r#"{"op":"exec","cmd":"ls"}"#,
+            r#"{"op":"shell"}"#,
+            r#"{"op":"enroll"}"#,
+            "{}",
+            "[]",
+        ] {
+            assert!(serde_json::from_str::<Request>(text).is_err(), "{text}");
+        }
+    }
+}

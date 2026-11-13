@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en" data-theme="night">
+<head>
+<meta charset="utf-8">
+<title>Wormhole banner</title>
+<!--
+  The source of assets/banner.png (README header, 1280x420 at 2x) and
+  assets/social-preview.png (the repository's social card, 1280x640): `?card` switches to
+  the tall card. The space and the planet are the panel's own scenes (banner.ts, built into
+  banner.js). The fonts are the design's own (SIL OFL).
+-->
+<link rel="stylesheet" href="../../panel/web/src/tokens.css">
+<style>
+  @font-face { font-family: "Space Grotesk"; src: url("../fonts/SpaceGrotesk-wght.woff2"); font-weight: 300 700; }
+  @font-face { font-family: "Estedad"; src: url("../fonts/Estedad-wght.woff2"); font-weight: 100 900; }
+  * { box-sizing: border-box; margin: 0; }
+  html, body { width: 1280px; height: 420px; overflow: hidden; background: #04020f; }
+  body.card, body.card html { height: 640px; }
+  #cosmos { position: fixed; inset: 0; width: 1280px; height: 100%; }
+  #planet { position: absolute; right: -40px; top: 0; width: 760px; height: 100%; }
+  .text { position: absolute; left: 72px; top: 50%; transform: translateY(-50%); font-family: "Space Grotesk", "Estedad", sans-serif; z-index: 2; }
+  .brand { display: flex; align-items: center; gap: 26px; }
+  .brand img { width: 112px; height: 112px; filter: drop-shadow(0 0 28px rgba(139,92,255,.6)); }
+  .name { display: flex; align-items: baseline; gap: 20px; }
+  .name b { font-size: 88px; font-weight: 700; line-height: 1; letter-spacing: .5px;
+            background: linear-gradient(100deg, #ffffff 10%, #bdf6ff 45%, #d8ccff 70%, #ffc6f5);
+            -webkit-background-clip: text; background-clip: text; color: transparent;
+            filter: drop-shadow(0 0 22px rgba(34,243,255,.35)); }
+  .name span { font-family: "Estedad", sans-serif; font-size: 56px; font-weight: 700; line-height: 1;
+               background: linear-gradient(100deg, #22f3ff, #8b5cff 60%, #ff3fd8); -webkit-background-clip: text; background-clip: text; color: transparent; }
+  .say { margin-top: 26px; }
+  .say .en { font-size: 30px; color: #e6e2ff; font-weight: 500; }
+  .say .fa { font-family: "Estedad", sans-serif; direction: rtl; text-align: left; font-size: 28px; color: #9ff8ff; margin-top: 10px; font-weight: 500; }
+  .say .sub { font-size: 19px; color: #a9a4d6; margin-top: 18px; letter-spacing: .2px; }
+  .say .sub b { color: #ffc6f5; font-weight: 600; }
+  .fade { position: absolute; inset: 0; background: linear-gradient(90deg, rgba(4,2,15,.85) 0%, rgba(4,2,15,.55) 38%, rgba(4,2,15,0) 62%); z-index: 1; pointer-events: none; }
+  .frame { position: absolute; inset: 0; border-radius: 28px; box-shadow: inset 0 0 0 2px rgba(139,92,255,.35), inset 0 0 80px rgba(0,0,0,.6); z-index: 3; pointer-events: none; }
+  body.card .text { left: 76px; }
+  body.card #planet { width: 820px; right: -80px; }
+</style>
+</head>
+<body>
+<canvas id="cosmos"></canvas>
+<canvas id="planet"></canvas>
+<div class="fade"></div>
+<div class="text">
+  <div class="brand">
+    <img src="../../assets/logo.svg" alt="">
+    <div class="name"><b>Wormhole</b><span>کرم‌چاله</span></div>
+  </div>
+  <div class="say">
+    <div class="en">A shortcut through spacetime, for your traffic.</div>
+    <div class="fa">میان‌بُری از دل فضا-زمان، برای ترافیک شما.</div>
+    <div class="sub">A fast, light tunnel between two servers, in Rust · by <b>ByeCoder</b></div>
+  </div>
+</div>
+<div class="frame"></div>
+<script>if (location.search.includes("card")) document.body.classList.add("card");</script>
+<script src="banner.js"></script>
+</body>
+</html>

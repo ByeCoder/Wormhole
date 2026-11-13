@@ -1,0 +1,2 @@
+# English pages of docs/ that have no Persian version yet.
+# scripts/check-translations.mjs keeps this list true.

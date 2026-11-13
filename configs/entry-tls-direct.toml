@@ -1,0 +1,27 @@
+# Entry side, direct mode, plain TLS: a TLS connection to the exit server and the tunnel
+# right inside it, with no HTTP and no WebSocket. On the wire it is an HTTPS connection
+# like any other; it cannot go through a CDN. Pair: exit-tls-direct.toml. Both servers
+# need 1.1.0 or newer.
+role = "entry"
+mode = "direct"
+profile = "balanced"
+
+[tunnel]
+transport = "wss"
+remote = "EXIT_SERVER_IP:443"
+token = "CHANGE-ME-run-wormhole-token"
+
+[tunnel.ws]
+mode = "tls"                       # same on both sides
+
+[tunnel.tls]
+sni = "www.example.com"            # the name to present
+# On the exit server: wormhole pin /etc/wormhole/cert.pem
+pin_sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+
+[[forward]]
+listen = "0.0.0.0:443"
+target = "127.0.0.1:443"
+
+[log]
+level = "info"

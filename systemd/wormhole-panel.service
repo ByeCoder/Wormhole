@@ -1,0 +1,15 @@
+[Unit]
+Description=Wormhole web panel
+Documentation=https://github.com/ByeCoder/Wormhole
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/wormhole-panel serve -c /etc/wormhole-panel/panel.toml
+Restart=always
+RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

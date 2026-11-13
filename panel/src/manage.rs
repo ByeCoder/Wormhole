@@ -1,0 +1,2023 @@
+//! What an agent does to its server's tunnels when the panel asks: check and write a config from a structured spec, read it back, control its
+//! service, delete it, list the listening ports, read the log, run the speed test.
+//!
+//! Nothing here takes a command, a path or a piece of config text from the panel: the file
+//! is rendered from typed fields (so a value cannot add a line to it), the name is checked
+//! against a strict pattern, and the programs that run get fixed arguments.
+
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use anyhow::{anyhow, bail, Context, Result};
+use wormhole::config::{mode_name, role_name, Config, Role};
+
+use crate::wire::{CheckReply, ForwardInfo, KcpSpec, PortOwner, Spec, SpeedReply, TextReply};
+
+const PLACEHOLDER_TOKEN: &str = "0000000000000000000000000000000000000000000000000000";
+
+/// A tunnel's name is its file name and its service (`wormhole@NAME`): small letters, digits
+/// and dashes, and it starts with a letter or a digit.
+pub fn valid_name(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    (1..=32).contains(&bytes.len())
+        && (bytes[0].is_ascii_lowercase() || bytes[0].is_ascii_digit())
+        && bytes
+            .iter()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'-')
+}
+
+fn config_path(dir: &Path, name: &str) -> Result<PathBuf> {
+    if !valid_name(name) {
+        bail!("a tunnel name is 1 to 32 characters: small letters, digits and dashes");
+    }
+    Ok(dir.join(format!("{name}.toml")))
+}
+
+/// The token a config already holds.
+fn existing_token(path: &Path) -> Option<String> {
+    let value: toml::Value = toml::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
+    Some(value.get("tunnel")?.get("token")?.as_str()?.to_owned())
+}
+
+/// The config file for a spec, with `token` in it.
+pub fn render(spec: &Spec, token: &str, cert_files: Option<(&Path, &Path)>) -> Result<String> {
+    use toml::{Table, Value};
+    let text = |s: &str| Value::String(s.to_owned());
+    let mut root = Table::new();
+    root.insert("role".into(), text(&spec.role));
+    root.insert("mode".into(), text(&spec.mode));
+    if let Some(profile) = &spec.profile {
+        root.insert("profile".into(), text(profile));
+    }
+    let mut tunnel = Table::new();
+    tunnel.insert("transport".into(), text(&spec.transport));
+    if let Some(cipher) = spec.encryption.as_deref().filter(|c| *c != "auto") {
+        tunnel.insert("encryption".into(), text(cipher));
+    }
+    if spec.quic_obfs && spec.transport == "quic" {
+        let mut quic = Table::new();
+        quic.insert("obfs".into(), Value::Boolean(true));
+        tunnel.insert("quic".into(), Value::Table(quic));
+    }
+    // Paqet runs its own encrypted KCP wire; `[tunnel.kcp]` is its tuning only for paqet
+    // (an older core refuses the table on every other transport).
+    if spec.transport == "paqet" {
+        if let Some(k) = spec.kcp.as_ref().filter(|k| !k.is_empty()) {
+            let mut kcp = Table::new();
+            if let Some(mode) = &k.mode {
+                kcp.insert("mode".into(), text(mode));
+            }
+            if let Some(v) = k.nodelay {
+                kcp.insert("nodelay".into(), Value::Boolean(v));
+            }
+            if let Some(v) = k.interval_ms {
+                kcp.insert("interval_ms".into(), Value::Integer(i64::from(v)));
+            }
+            if let Some(v) = k.resend {
+                kcp.insert("resend".into(), Value::Integer(i64::from(v)));
+            }
+            if let Some(v) = k.no_congestion {
+                kcp.insert("no_congestion".into(), Value::Boolean(v));
+            }
+            if let Some(v) = k.send_window {
+                kcp.insert("send_window".into(), Value::Integer(i64::from(v)));
+            }
+            if let Some(v) = k.recv_window {
+                kcp.insert("recv_window".into(), Value::Integer(i64::from(v)));
+            }
+            if let Some(v) = k.mtu {
+                kcp.insert(
+                    "mtu".into(),
+                    Value::Integer(i64::try_from(v).unwrap_or(i64::MAX)),
+                );
+            }
+            if let Some(v) = k.fec_data {
+                kcp.insert(
+                    "fec_data".into(),
+                    Value::Integer(i64::try_from(v).unwrap_or(i64::MAX)),
+                );
+            }
+            if let Some(v) = k.fec_parity {
+                kcp.insert(
+                    "fec_parity".into(),
+                    Value::Integer(i64::try_from(v).unwrap_or(i64::MAX)),
+                );
+            }
+            if let Some(v) = k.datagrams {
+                kcp.insert("datagrams".into(), Value::Boolean(v));
+            }
+            tunnel.insert("kcp".into(), Value::Table(kcp));
+        }
+    }
+    // Spoof's forged addresses. Per-side, and only for spoof (the core refuses the table
+    // elsewhere). Its `[tunnel.kcp]` tuning, if any, is written by the block above too.
+    if spec.transport == "spoof" {
+        if let Some(sp) = spec.spoof.as_ref().filter(|s| !s.is_empty()) {
+            let mut spoof = Table::new();
+            if let Some(ip) = &sp.spoof_ip {
+                spoof.insert("spoof_ip".into(), text(ip));
+            }
+            if !sp.spoof_ips.is_empty() {
+                spoof.insert(
+                    "spoof_ips".into(),
+                    Value::Array(sp.spoof_ips.iter().map(|ip| text(ip)).collect()),
+                );
+            }
+            if let Some(ip) = &sp.peer_spoof_ip {
+                spoof.insert("peer_spoof_ip".into(), text(ip));
+            }
+            if let Some(ip) = &sp.peer_ip {
+                spoof.insert("peer_ip".into(), text(ip));
+            }
+            if let Some(port) = sp.port {
+                spoof.insert("port".into(), Value::Integer(i64::from(port)));
+            }
+            tunnel.insert("spoof".into(), Value::Table(spoof));
+        }
+    }
+    if let Some(listen) = &spec.listen {
+        tunnel.insert("listen".into(), text(listen));
+    }
+    if let Some(remote) = &spec.remote {
+        tunnel.insert("remote".into(), text(remote));
+    }
+    tunnel.insert("token".into(), text(token));
+    if let Some(pool) = spec.pool {
+        tunnel.insert("pool".into(), Value::Integer(i64::from(pool)));
+    }
+    if spec.ws_path.is_some() || spec.ws_host.is_some() || spec.ws_mode.is_some() {
+        let mut ws = Table::new();
+        if let Some(path) = &spec.ws_path {
+            ws.insert("path".into(), text(path));
+        }
+        if let Some(mode) = &spec.ws_mode {
+            ws.insert("mode".into(), text(mode));
+        }
+        if let Some(host) = &spec.ws_host {
+            ws.insert("host".into(), text(host));
+        }
+        tunnel.insert("ws".into(), Value::Table(ws));
+    }
+    if let Some(mux) = spec.mux.as_ref().filter(|m| !m.is_empty()) {
+        let mut t = Table::new();
+        let int = |v: u64| Value::Integer(i64::try_from(v).unwrap_or(i64::MAX));
+        if let Some(v) = mux.enabled {
+            t.insert("enabled".into(), Value::Boolean(v));
+        }
+        if let Some(v) = mux.connections {
+            t.insert("connections".into(), int(v.into()));
+        }
+        if let Some(v) = mux.max_streams {
+            t.insert("max_streams".into(), int(v.into()));
+        }
+        if let Some(v) = mux.stream_window {
+            t.insert("stream_window".into(), int(v.into()));
+        }
+        if let Some(v) = mux.max_lifetime_secs {
+            t.insert("max_lifetime_secs".into(), int(v));
+        }
+        if let Some(v) = mux.ping_interval_secs {
+            t.insert("ping_interval_secs".into(), int(v));
+        }
+        if let Some(v) = mux.coalesce {
+            t.insert("coalesce".into(), Value::Boolean(v));
+        }
+        if let Some(v) = mux.spread {
+            t.insert("spread".into(), Value::Boolean(v));
+        }
+        tunnel.insert("mux".into(), Value::Table(t));
+    }
+    if let Some((cert, key)) = cert_files {
+        // A listening wss side serves the certificate this agent made for it.
+        let mut tls = Table::new();
+        tls.insert("cert".into(), text(&cert.to_string_lossy()));
+        tls.insert("key".into(), text(&key.to_string_lossy()));
+        tunnel.insert("tls".into(), Value::Table(tls));
+    } else if spec.tls_sni.is_some() || spec.tls_pin.is_some() {
+        let mut tls = Table::new();
+        if let Some(sni) = &spec.tls_sni {
+            tls.insert("sni".into(), text(sni));
+        }
+        if let Some(pin) = &spec.tls_pin {
+            tls.insert("pin_sha256".into(), text(pin));
+        }
+        tunnel.insert("tls".into(), Value::Table(tls));
+    }
+    root.insert("tunnel".into(), Value::Table(tunnel));
+    let mut tuning = Table::new();
+    if let Some(limit) = spec.max_conns_per_ip.filter(|v| *v > 0) {
+        tuning.insert("max_conns_per_ip".into(), Value::Integer(i64::from(limit)));
+    }
+    if let Some(flows) = spec.udp_max_flows.filter(|v| *v > 0) {
+        tuning.insert("udp_max_flows".into(), Value::Integer(i64::from(flows)));
+    }
+    if !tuning.is_empty() {
+        root.insert("tuning".into(), Value::Table(tuning));
+    }
+    let forwards: Vec<Value> = spec
+        .forwards
+        .iter()
+        .map(|f| {
+            let mut t = Table::new();
+            t.insert("listen".into(), text(&f.listen));
+            t.insert("target".into(), text(&f.target));
+            t.insert("protocol".into(), text(&f.protocol));
+            // PROXY headers are for TCP: a UDP rule would refuse the setting.
+            if let Some(v) = &spec.proxy_protocol {
+                if matches!(f.protocol.as_str(), "tcp" | "tcp+udp") {
+                    t.insert("proxy_protocol".into(), text(v));
+                }
+            }
+            Value::Table(t)
+        })
+        .collect();
+    if !forwards.is_empty() {
+        root.insert("forward".into(), Value::Array(forwards));
+    }
+    toml::to_string_pretty(&root).context("failed to render the config")
+}
+
+/// Renders and validates a spec (the token of an existing file is kept when the spec has
+/// none). The text and the parsed config come back.
+fn build(dir: &Path, spec: &Spec, for_check: bool) -> Result<(String, Config)> {
+    let path = config_path(dir, &spec.name)?;
+    let token = match (&spec.token, existing_token(&path)) {
+        (Some(t), _) => t.clone(),
+        (None, Some(t)) => t,
+        (None, None) if for_check => PLACEHOLDER_TOKEN.to_owned(),
+        (None, None) => bail!("a new tunnel needs a token"),
+    };
+    if token.len() < 16 || !token.bytes().all(|b| b.is_ascii_graphic()) {
+        bail!("the token is too short or has characters it should not");
+    }
+    plain_text(spec)?;
+    // The core validates this too once its version knows `paqet`; checking here gives the
+    // panel the same ranges before a line is written, and keeps a KCP table off anything
+    // but paqet.
+    crate::pair::validate_kcp(&spec.transport, spec.kcp.as_ref())?;
+    let files = cert_files(dir, spec);
+    let text = render(
+        spec,
+        &token,
+        files.as_ref().map(|(c, k)| (c.as_path(), k.as_path())),
+    )?;
+    let config = Config::parse(&text)?;
+    Ok((text, config))
+}
+
+/// Whether this side of the spec listens for the tunnel.
+fn is_acceptor(spec: &Spec) -> bool {
+    matches!(
+        (spec.role.as_str(), spec.mode.as_str()),
+        ("entry", "reverse") | ("exit", "direct")
+    )
+}
+
+/// The certificate and key of a listening wss side, beside its config.
+fn cert_files(dir: &Path, spec: &Spec) -> Option<(PathBuf, PathBuf)> {
+    if !(spec.transport == "wss" && is_acceptor(spec)) {
+        return None;
+    }
+    if let Some(own) = own_cert(spec) {
+        return Some(own);
+    }
+    Some((
+        dir.join(format!("{}.crt", spec.name)),
+        dir.join(format!("{}.key", spec.name)),
+    ))
+}
+
+/// Where Let's Encrypt keeps the certificates the manager gets.
+pub const LIVE: &str = "/etc/letsencrypt/live/";
+
+/// The endings a certificate or key file of a spec may have: the agent never reads another
+/// kind of file on the panel's say (a password file, a config), only PEM files.
+const CERT_ENDINGS: [&str; 4] = [".pem", ".crt", ".cer", ".key"];
+
+/// Whether `path` can be a certificate or key file a spec names: one the manager got (under
+/// [`LIVE`]) or one of the admin's own, anywhere on the server but the kernel's own trees,
+/// as long as it is an absolute plain path that ends like a PEM file.
+pub fn valid_cert_path(path: &str) -> bool {
+    path.starts_with('/')
+        && CERT_ENDINGS.iter().any(|e| path.ends_with(e))
+        && !["/proc/", "/sys/", "/dev/"]
+            .iter()
+            .any(|p| path.starts_with(p))
+        && !path.contains("..")
+        && !path.contains("//")
+        && path.len() < 200
+        && path
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"/-_.".contains(&b))
+}
+
+/// Whether `path` is a file of a certificate the manager got from Let's Encrypt.
+pub fn lets_encrypt_path(path: &str) -> bool {
+    path.starts_with(LIVE) && path.ends_with(".pem") && valid_cert_path(path)
+}
+
+/// The files of a real certificate a spec names, if it names a valid pair.
+fn own_cert(spec: &Spec) -> Option<(PathBuf, PathBuf)> {
+    let (cert, key) = (spec.tls_cert.as_deref()?, spec.tls_key.as_deref()?);
+    (valid_cert_path(cert) && valid_cert_path(key))
+        .then(|| (PathBuf::from(cert), PathBuf::from(key)))
+}
+
+/// Every text field of a spec is one plain line: no control characters, so nothing a
+/// panel sends can break out of its value.
+fn plain_text(spec: &Spec) -> Result<()> {
+    if spec.tls_cert.is_some() != spec.tls_key.is_some() {
+        bail!("a certificate needs its key too");
+    }
+    if let (Some(cert), Some(key)) = (&spec.tls_cert, &spec.tls_key) {
+        if !valid_cert_path(cert) || !valid_cert_path(key) {
+            bail!(
+                "a certificate and its key are files on the server: absolute paths of letters, digits and - _ . / that end in .pem, .crt, .cer or .key"
+            );
+        }
+    }
+    let optional = [
+        &spec.encryption,
+        &spec.profile,
+        &spec.listen,
+        &spec.remote,
+        &spec.ws_path,
+        &spec.ws_mode,
+        &spec.ws_host,
+        &spec.tls_sni,
+        &spec.tls_pin,
+        &spec.proxy_protocol,
+    ];
+    let fields = [&spec.role, &spec.mode, &spec.transport]
+        .into_iter()
+        .chain(optional.into_iter().flatten())
+        .chain(
+            spec.forwards
+                .iter()
+                .flat_map(|f| [&f.listen, &f.target, &f.protocol]),
+        );
+    for value in fields {
+        if value.len() > 512 || value.chars().any(char::is_control) {
+            bail!("a value is too long or has control characters in it");
+        }
+    }
+    Ok(())
+}
+
+/// The (protocol, port) pairs a spec listens on.
+pub fn wanted_ports(spec: &Spec) -> Vec<(&'static str, u16)> {
+    let mut out = Vec::new();
+    let port =
+        |addr: &str| -> Option<u16> { addr.rsplit_once(':').map_or(addr, |(_, p)| p).parse().ok() };
+    if is_acceptor(spec) {
+        // Paqet listens on a raw TCP port: the kernel's TCP stack (with scoped RST
+        // suppression) sees the port, so a TCP conflict must be reported like any other.
+        // Such a raw listener does not appear in `/proc/net/tcp`; the tunnel's own port is
+        // excluded by `check` below, from the spec it is replacing.
+        let udp = matches!(spec.transport.as_str(), "quic" | "kcp");
+        if let Some(p) = spec.listen.as_deref().and_then(port) {
+            out.push((if udp { "udp" } else { "tcp" }, p));
+            // Auto listens for all of its transports: UDP on the port too, and a
+            // WebSocket on the next one.
+            if spec.transport == "auto" {
+                out.push(("udp", p));
+                if let Some(next) = p.checked_add(1) {
+                    out.push(("tcp", next));
+                }
+            }
+        }
+    }
+    if spec.role == "entry" {
+        for f in &spec.forwards {
+            let Some(p) = port(&f.listen) else { continue };
+            if f.protocol.contains("tcp") || f.protocol.is_empty() {
+                out.push(("tcp", p));
+            }
+            if f.protocol.contains("udp") {
+                out.push(("udp", p));
+            }
+        }
+    }
+    out
+}
+
+/// Validates a spec on this server and says which of its ports are taken by others.
+pub fn check(dir: &Path, owners: &[PortOwner], spec: &Spec) -> CheckReply {
+    let config = match build(dir, spec, true) {
+        Ok((_, c)) => c,
+        Err(e) => {
+            return CheckReply {
+                ok: false,
+                error: Some(format!("{e:#}")),
+                ..Default::default()
+            }
+        }
+    };
+    // What the tunnel of this name holds now is not a conflict: it is being replaced.
+    let own: Vec<(&str, u16)> = get(dir, &spec.name)
+        .map(|old| wanted_ports(&old))
+        .unwrap_or_default();
+    let conflicts: Vec<PortOwner> = wanted_ports(spec)
+        .into_iter()
+        .filter(|w| !own.contains(w))
+        .flat_map(|(proto, port)| {
+            owners
+                .iter()
+                .filter(move |o| o.proto == proto && o.port == port)
+                .cloned()
+        })
+        .collect();
+    CheckReply {
+        ok: conflicts.is_empty(),
+        error: (!conflicts.is_empty()).then(|| "a port is already in use".to_owned()),
+        warnings: config.warnings().iter().map(|w| (*w).to_owned()).collect(),
+        conflicts,
+    }
+}
+
+/// Writes the config (0600), keeping the previous file as `NAME.toml.bak`. A listening wss
+/// side gets a self-signed certificate made for it (once); its pin comes back, for the
+/// dialing side.
+pub fn put(dir: &Path, spec: &Spec) -> Result<Option<String>> {
+    let (text, _) = build(dir, spec, false)?;
+    let path = config_path(dir, &spec.name)?;
+    let pin = match cert_files(dir, spec) {
+        // A real certificate: its files must be there and go together; nothing is pinned
+        // (the other side checks the certificate against the web's roots).
+        Some((cert, key)) if own_cert(spec).is_some() => {
+            if !cert.exists() || !key.exists() {
+                bail!(
+                    "the certificate files are not there ({} and {}): get the certificate again, or put them there",
+                    cert.display(),
+                    key.display()
+                );
+            }
+            wormhole::transport::tls::acceptor(&cert, &key)
+                .map_err(|e| anyhow::anyhow!("the certificate cannot be used: {e}"))?;
+            None
+        }
+        Some((cert, key)) => Some(crate::cert::ensure(&cert, &key)?),
+        None => None,
+    };
+    if path.exists() {
+        let mut bak = path.as_os_str().to_owned();
+        bak.push(".bak");
+        let old = std::fs::read(&path)?;
+        crate::agent::write_private(Path::new(&bak), &old)?;
+    }
+    crate::agent::write_private(&path, text.as_bytes())?;
+    Ok(pin)
+}
+
+/// Puts back the config that the last [`put`] replaced (`NAME.toml.bak`): an edit that did
+/// not work is undone exactly, its token too (which the panel never sees, so it could not
+/// write the old one again itself).
+pub fn revert(dir: &Path, name: &str) -> Result<()> {
+    let path = config_path(dir, name)?;
+    let mut bak = path.as_os_str().to_owned();
+    bak.push(".bak");
+    let old = std::fs::read(Path::new(&bak)).context("there is no earlier config to put back")?;
+    crate::agent::write_private(&path, &old)
+}
+
+/// A `paqet` tunnel's `[tunnel.kcp]` as the page holds it, with only the keys the file had:
+/// defaults the core fills in are left out, so an edit does not write them back.
+fn kcp_spec_from_toml(value: Option<&toml::Value>) -> Option<KcpSpec> {
+    let table = value?.as_table()?;
+    let int = |key: &str| table.get(key).and_then(toml::Value::as_integer);
+    let uint = |key: &str| int(key).and_then(|v| u32::try_from(v).ok());
+    let size = |key: &str| int(key).and_then(|v| usize::try_from(v).ok());
+    let boolean = |key: &str| table.get(key).and_then(toml::Value::as_bool);
+    let kcp = KcpSpec {
+        mode: table
+            .get("mode")
+            .and_then(toml::Value::as_str)
+            .map(str::to_owned),
+        nodelay: boolean("nodelay"),
+        interval_ms: uint("interval_ms"),
+        resend: uint("resend"),
+        no_congestion: boolean("no_congestion"),
+        send_window: uint("send_window"),
+        recv_window: uint("recv_window"),
+        mtu: size("mtu"),
+        fec_data: size("fec_data"),
+        fec_parity: size("fec_parity"),
+        datagrams: boolean("datagrams"),
+    };
+    (!kcp.is_empty()).then_some(kcp)
+}
+
+/// A `spoof` tunnel's `[tunnel.spoof]` as the file holds it.
+fn spoof_spec_from_toml(value: Option<&toml::Value>) -> Option<crate::wire::SpoofSpec> {
+    let table = value?.as_table()?;
+    let str_of = |key: &str| {
+        table
+            .get(key)
+            .and_then(toml::Value::as_str)
+            .map(str::to_owned)
+    };
+    let list = table
+        .get("spoof_ips")
+        .and_then(toml::Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_owned))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let spoof = crate::wire::SpoofSpec {
+        spoof_ip: str_of("spoof_ip"),
+        spoof_ips: list,
+        peer_spoof_ip: str_of("peer_spoof_ip"),
+        peer_ip: str_of("peer_ip"),
+        port: table
+            .get("port")
+            .and_then(toml::Value::as_integer)
+            .and_then(|v| u16::try_from(v).ok()),
+    };
+    (!spoof.is_empty()).then_some(spoof)
+}
+
+/// The spec of an existing tunnel, without its token.
+pub fn get(dir: &Path, name: &str) -> Result<Spec> {
+    let path = config_path(dir, name)?;
+    if !path.exists() {
+        bail!("no_such_tunnel");
+    }
+    let c = Config::load(&path)?;
+    let transport = c.tunnel.transport.name().to_owned();
+    // Read the table as it is in the file, not the defaults the core fills in: an edit
+    // keeps only the values the admin set, and never silently resets a manual tuning. Only
+    // paqet has KCP tuning here; a plain kcp tunnel keeps its config as the panel found it.
+    let kcp = (transport == "paqet")
+        .then(|| {
+            std::fs::read_to_string(&path)
+                .ok()
+                .and_then(|text| toml::from_str::<toml::Value>(&text).ok())
+        })
+        .flatten()
+        .and_then(|raw| kcp_spec_from_toml(raw.get("tunnel").and_then(|t| t.get("kcp"))));
+    let spoof = (transport == "spoof")
+        .then(|| {
+            std::fs::read_to_string(&path)
+                .ok()
+                .and_then(|text| toml::from_str::<toml::Value>(&text).ok())
+        })
+        .flatten()
+        .and_then(|raw| spoof_spec_from_toml(raw.get("tunnel").and_then(|t| t.get("spoof"))));
+    Ok(Spec {
+        name: name.to_owned(),
+        role: role_name(c.role).to_owned(),
+        mode: mode_name(c.mode).to_owned(),
+        transport,
+        profile: Some(c.profile.name().to_owned()),
+        listen: c.tunnel.listen.clone(),
+        remote: c.tunnel.remote.clone(),
+        token: None,
+        pool: Some(u32::try_from(c.tunnel.pool).unwrap_or(8)),
+        ws_path: c.tunnel.ws.as_ref().map(|w| w.path.clone()),
+        // Left out for the default (frames), so a plain ws tunnel reads as before.
+        ws_mode: c
+            .tunnel
+            .ws
+            .as_ref()
+            .map(|w| w.mode)
+            .filter(|m| *m != wormhole::config::WsMode::Websocket)
+            .map(|m| m.name().to_owned()),
+        ws_host: c.tunnel.ws.as_ref().and_then(|w| w.host.clone()),
+        encryption: (c.tunnel.encryption != wormhole::config::Encryption::Auto)
+            .then(|| c.tunnel.encryption.name().to_owned()),
+        quic_obfs: c.tunnel.quic.as_ref().is_some_and(|q| q.obfs),
+        max_conns_per_ip: c.tuning.max_conns_per_ip.filter(|v| *v > 0),
+        udp_max_flows: c.tuning.udp_max_flows.and_then(|v| u32::try_from(v).ok()),
+        // The panel writes the same one on every TCP rule.
+        proxy_protocol: c
+            .forward
+            .iter()
+            .find(|f| f.protocol.has_tcp())
+            .and_then(|f| f.proxy_protocol)
+            .map(|v| v.name().to_owned()),
+        mux: Some(crate::wire::MuxSpec {
+            enabled: c.tunnel.mux.enabled,
+            connections: c.tunnel.mux.connections.and_then(|v| u32::try_from(v).ok()),
+            max_streams: c.tunnel.mux.max_streams.and_then(|v| u32::try_from(v).ok()),
+            stream_window: c
+                .tunnel
+                .mux
+                .stream_window
+                .and_then(|v| u32::try_from(v).ok()),
+            max_lifetime_secs: c.tunnel.mux.max_lifetime_secs,
+            ping_interval_secs: c.tunnel.mux.ping_interval_secs,
+            coalesce: c.tunnel.mux.coalesce,
+            spread: c.tunnel.mux.spread,
+        })
+        .filter(|m| !m.is_empty()),
+        kcp,
+        spoof,
+        tls_sni: c.tunnel.tls.as_ref().and_then(|t| t.sni.clone()),
+        tls_cert: c
+            .tunnel
+            .tls
+            .as_ref()
+            .and_then(|t| t.cert.as_ref())
+            .map(|p| p.to_string_lossy().into_owned())
+            .filter(|p| valid_cert_path(p)),
+        tls_key: c
+            .tunnel
+            .tls
+            .as_ref()
+            .and_then(|t| t.key.as_ref())
+            .map(|p| p.to_string_lossy().into_owned())
+            .filter(|p| valid_cert_path(p)),
+        tls_pin: c.tunnel.tls.as_ref().and_then(|t| {
+            t.pin_sha256.clone().or_else(|| {
+                t.cert
+                    .as_deref()
+                    .and_then(|p| crate::cert::fingerprint(p).ok())
+            })
+        }),
+        forwards: c
+            .forward
+            .iter()
+            .map(|f| ForwardInfo {
+                listen: f.listen.clone(),
+                target: f.target.clone(),
+                protocol: f.protocol.name().to_owned(),
+            })
+            .collect(),
+    })
+}
+
+/// Removes the config, its backup and its control socket (the service is stopped first by
+/// the caller).
+pub fn remove_files(dir: &Path, name: &str) -> Result<()> {
+    let path = config_path(dir, name)?;
+    for p in [
+        path.clone(),
+        path.with_extension("toml.bak"),
+        path.with_extension("sock"),
+        path.with_extension("crt"),
+        path.with_extension("key"),
+    ] {
+        match std::fs::remove_file(&p) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e).with_context(|| format!("failed to remove {}", p.display())),
+        }
+    }
+    Ok(())
+}
+
+// ---- listening ports ----
+
+fn parse_addr(hex: &str) -> Option<String> {
+    match hex.len() {
+        8 => {
+            let n = u32::from_str_radix(hex, 16).ok()?;
+            Some(std::net::Ipv4Addr::from(n.swap_bytes()).to_string())
+        }
+        32 => {
+            let mut bytes = [0u8; 16];
+            for (i, chunk) in hex.as_bytes().chunks(8).enumerate() {
+                let word = u32::from_str_radix(std::str::from_utf8(chunk).ok()?, 16).ok()?;
+                bytes[i * 4..i * 4 + 4].copy_from_slice(&word.swap_bytes().to_be_bytes());
+            }
+            Some(std::net::Ipv6Addr::from(bytes).to_string())
+        }
+        _ => None,
+    }
+}
+
+/// The listening sockets in a `/proc/net/{tcp,tcp6,udp,udp6}` file: (address, port, inode).
+pub fn parse_proc_net(text: &str, udp: bool) -> Vec<(String, u16, u64)> {
+    let listening = if udp { "07" } else { "0A" };
+    text.lines()
+        .skip(1)
+        .filter_map(|line| {
+            let f: Vec<&str> = line.split_whitespace().collect();
+            if f.len() < 10 || f[3] != listening {
+                return None;
+            }
+            let (addr, port) = f[1].split_once(':')?;
+            let port = u16::from_str_radix(port, 16).ok()?;
+            if port == 0 {
+                return None;
+            }
+            Some((parse_addr(addr)?, port, f[9].parse().ok()?))
+        })
+        .collect()
+}
+
+/// Which process holds each socket inode, from `/proc/*/fd`.
+#[cfg(target_os = "linux")]
+fn inode_owners(wanted: &[u64]) -> HashMap<u64, (u32, String)> {
+    let mut found = HashMap::new();
+    let Ok(procs) = std::fs::read_dir("/proc") else {
+        return found;
+    };
+    for entry in procs.filter_map(Result::ok) {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|s| s.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        let Ok(fds) = std::fs::read_dir(entry.path().join("fd")) else {
+            continue;
+        };
+        for fd in fds.filter_map(Result::ok) {
+            let Ok(link) = std::fs::read_link(fd.path()) else {
+                continue;
+            };
+            let link = link.to_string_lossy();
+            let Some(inode) = link
+                .strip_prefix("socket:[")
+                .and_then(|s| s.strip_suffix(']'))
+                .and_then(|s| s.parse::<u64>().ok())
+            else {
+                continue;
+            };
+            if wanted.contains(&inode) && !found.contains_key(&inode) {
+                let comm = std::fs::read_to_string(entry.path().join("comm"))
+                    .map(|c| c.trim().to_owned())
+                    .unwrap_or_default();
+                found.insert(inode, (pid, comm));
+            }
+        }
+    }
+    found
+}
+
+#[cfg(not(target_os = "linux"))]
+fn inode_owners(_: &[u64]) -> HashMap<u64, (u32, String)> {
+    HashMap::new()
+}
+
+/// Every TCP and UDP port this server listens on, with the process that owns it.
+pub fn ports() -> Vec<PortOwner> {
+    let mut sockets = Vec::new();
+    for (file, proto) in [
+        ("/proc/net/tcp", "tcp"),
+        ("/proc/net/tcp6", "tcp"),
+        ("/proc/net/udp", "udp"),
+        ("/proc/net/udp6", "udp"),
+    ] {
+        if let Ok(text) = std::fs::read_to_string(file) {
+            for (addr, port, inode) in parse_proc_net(&text, proto == "udp") {
+                sockets.push((proto, addr, port, inode));
+            }
+        }
+    }
+    let owners = inode_owners(&sockets.iter().map(|s| s.3).collect::<Vec<_>>());
+    let mut out: Vec<PortOwner> = sockets
+        .into_iter()
+        .map(|(proto, addr, port, inode)| {
+            let owner = owners.get(&inode);
+            PortOwner {
+                proto: proto.to_owned(),
+                addr,
+                port,
+                process: owner.map(|o| o.1.clone()).filter(|c| !c.is_empty()),
+                pid: owner.map(|o| o.0),
+            }
+        })
+        .collect();
+    out.sort_by(|a, b| (a.port, &a.proto, &a.addr).cmp(&(b.port, &b.proto, &b.addr)));
+    out.dedup();
+    out
+}
+
+// ---- systemd, the journal, the speed test ----
+
+/// The `systemctl` arguments for an action on a tunnel's service.
+pub fn ctl_args(name: &str, action: &str) -> Result<Vec<String>> {
+    if !valid_name(name) {
+        bail!("a tunnel name is 1 to 32 characters: small letters, digits and dashes");
+    }
+    let unit = format!("wormhole@{name}");
+    Ok(match action {
+        "start" | "stop" | "restart" => vec![action.to_owned(), unit],
+        "enable" | "disable" => vec![action.to_owned(), "--now".to_owned(), unit],
+        _ => bail!("unknown action {action}"),
+    })
+}
+
+/// Runs a program with fixed arguments and a time limit; its output, or why it failed.
+pub(crate) async fn run(program: &str, args: &[String], limit: Duration) -> Result<(bool, String)> {
+    let mut command = tokio::process::Command::new(program);
+    command.args(args).kill_on_drop(true);
+    let output = tokio::time::timeout(limit, command.output())
+        .await
+        .map_err(|_| anyhow!("{program} took longer than {} s", limit.as_secs()))?
+        .with_context(|| format!("failed to run {program}"))?;
+    let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
+    text.push_str(&String::from_utf8_lossy(&output.stderr));
+    text.truncate(512 * 1024);
+    Ok((output.status.success(), text))
+}
+
+/// The program that gets certificates (the manager script, installed with Wormhole).
+const MANAGER: &str = "/usr/local/bin/wormhole-manager";
+
+/// The manager script of this release. An update swaps the programs but not the script, so
+/// the installed one can be older than the commands sent to it (one without `tunnel-cert`
+/// only prints its usage).
+const MANAGER_SCRIPT: &str = include_str!("../../scripts/wormhole.sh");
+
+/// Makes the installed manager the one of this release, when it is missing or different.
+fn sync_manager(path: &Path) -> Result<()> {
+    if std::fs::read(path).is_ok_and(|have| have == MANAGER_SCRIPT.as_bytes()) {
+        return Ok(());
+    }
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".new");
+    let tmp = PathBuf::from(tmp);
+    std::fs::write(&tmp, MANAGER_SCRIPT)
+        .with_context(|| format!("failed to write {}", tmp.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755))?;
+    }
+    std::fs::rename(&tmp, path).with_context(|| format!("failed to replace {}", path.display()))
+}
+
+/// Puts the manager of this release in place when the panel or the agent starts, if the one
+/// there is missing or different. An update from the panel swaps the programs and restarts
+/// them, but not the script: a server set up long ago and updated only from the panel went on
+/// showing the menu of the release it was installed with. Only on a systemd host (not where the
+/// tests run the programs, which name a manager of their own); a failure only goes to the log.
+pub fn manager_in_place(services: ServiceKind) {
+    if !cfg!(target_os = "linux")
+        || services != ServiceKind::Systemd
+        || std::env::var_os("WORMHOLE_MANAGER").is_some()
+    {
+        return;
+    }
+    let path = Path::new(MANAGER);
+    if std::fs::read(path).is_ok_and(|have| have == MANAGER_SCRIPT.as_bytes()) {
+        return;
+    }
+    match sync_manager(path) {
+        Ok(()) => tracing::info!("put the wormhole-manager script of this release in place"),
+        Err(e) => tracing::warn!("the manager script could not be updated: {e:#}"),
+    }
+}
+
+/// The manager's timer for `panel heal`: when the server's IP address changes and the panel's
+/// certificate was for the old one, it gets one for the new address by itself.
+const HEAL_TIMER: &str = "/etc/systemd/system/wormhole-panel-heal.timer";
+
+/// Whether the panel's Let's Encrypt certificate (the manager keeps what it is for in
+/// `domain`, next to the settings) has no `panel heal` timer yet: a panel set up before the
+/// manager had it.
+fn heal_timer_missing(domain: &Path, timer: &Path) -> bool {
+    std::fs::read_to_string(domain).is_ok_and(|d| !d.trim().is_empty()) && !timer.exists()
+}
+
+/// Sets up the `panel heal` timer on a panel that was set up before it existed, with the
+/// manager of this release (put in place first: [`manager_in_place`]): a panel updated from the
+/// panel gets it without the manager being run by hand. Nothing when the timer is there; a
+/// failure only goes to the log.
+pub async fn ensure_heal_timer(config: &Path) {
+    if !cfg!(target_os = "linux") || std::env::var_os("WORMHOLE_MANAGER").is_some() {
+        return;
+    }
+    let domain = config.with_file_name("domain");
+    if !heal_timer_missing(&domain, Path::new(HEAL_TIMER))
+        || !std::fs::read(MANAGER).is_ok_and(|have| have == MANAGER_SCRIPT.as_bytes())
+    {
+        return;
+    }
+    let args = ["panel".to_owned(), "heal-setup".to_owned()];
+    match run(MANAGER, &args, Duration::from_secs(30)).await {
+        Ok((true, _)) => {
+            tracing::info!("set up the timer that follows a new IP address of this server")
+        }
+        Ok((false, out)) => {
+            tracing::warn!("wormhole-manager panel heal-setup failed: {}", out.trim())
+        }
+        Err(e) => tracing::warn!("wormhole-manager panel heal-setup failed: {e:#}"),
+    }
+}
+
+/// Whether `host` is a domain name or an IPv4 address the manager may ask a certificate for.
+pub fn valid_cert_host(host: &str) -> bool {
+    if host.parse::<std::net::Ipv4Addr>().is_ok() {
+        return true;
+    }
+    host.len() <= 253
+        && host.contains('.')
+        && host.split('.').all(|l| {
+            !l.is_empty()
+                && l.len() <= 63
+                && !l.starts_with('-')
+                && !l.ends_with('-')
+                && l.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        })
+        && !host
+            .split('.')
+            .next_back()
+            .is_some_and(|tld| tld.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// Gets a Let's Encrypt certificate for `host` through the manager, which stops whatever
+/// holds port 80 for a few seconds, asks, and starts it again. The certificate renews by
+/// itself; a tunnel that names its files reloads it.
+pub async fn issue_cert(host: &str, email: Option<&str>) -> crate::wire::CertReply {
+    let failed = |e: String| crate::wire::CertReply {
+        ok: false,
+        error: Some(e),
+        ..Default::default()
+    };
+    let host = host.trim().to_ascii_lowercase();
+    if !valid_cert_host(&host) {
+        return failed("bad_host".into());
+    }
+    if let Some(mail) = email {
+        let ok = mail.len() <= 120
+            && mail.contains('@')
+            && mail
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"@.-_+".contains(&b));
+        if !ok {
+            return failed("bad_email".into());
+        }
+    }
+    let program = match std::env::var("WORMHOLE_MANAGER") {
+        Ok(program) => program,
+        Err(_) => {
+            if let Err(e) = sync_manager(Path::new(MANAGER)) {
+                tracing::warn!("the manager script could not be updated: {e:#}");
+            }
+            MANAGER.to_owned()
+        }
+    };
+    if !Path::new(&program).exists() {
+        return failed("no_manager".into());
+    }
+    let mut args = vec!["tunnel-cert".to_owned()];
+    args.push(
+        if host.parse::<std::net::Ipv4Addr>().is_ok() {
+            "--ip"
+        } else {
+            "--domain"
+        }
+        .into(),
+    );
+    args.push(host.clone());
+    if let Some(mail) = email.filter(|m| !m.is_empty()) {
+        args.extend(["--email".into(), mail.to_owned()]);
+    }
+    let (ok, text) = match run(&program, &args, Duration::from_secs(600)).await {
+        Ok(v) => v,
+        Err(e) => return failed(format!("{e:#}")),
+    };
+    let found = |key: &str| {
+        text.lines()
+            .rev()
+            .find_map(|l| l.strip_prefix(key))
+            .map(|p| p.trim().to_owned())
+            .filter(|p| lets_encrypt_path(p))
+    };
+    match (ok, found("cert="), found("key=")) {
+        (true, Some(cert), Some(key)) => crate::wire::CertReply {
+            ok: true,
+            error: None,
+            cert: Some(cert),
+            key: Some(key),
+        },
+        _ => {
+            // The last lines say why (Let's Encrypt's own words).
+            let tail: Vec<&str> = text
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .collect();
+            let tail = tail[tail.len().saturating_sub(6)..].join(" | ");
+            failed(if tail.is_empty() {
+                "failed".into()
+            } else {
+                tail
+            })
+        }
+    }
+}
+
+/// How a server runs its tunnels: `systemd` (the default) or `process`, as child
+/// processes of the panel or the agent, for a host that has no systemd.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ServiceKind {
+    #[default]
+    Systemd,
+    Process,
+}
+
+impl ServiceKind {
+    pub fn services(self, dir: &Path) -> std::sync::Arc<dyn Services> {
+        match self {
+            Self::Systemd => std::sync::Arc::new(Systemd),
+            Self::Process => std::sync::Arc::new(Processes::new(dir, &wormhole_binary())),
+        }
+    }
+}
+
+pub type Fut<T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send>>;
+
+/// How a server starts, stops and asks about its tunnels' services. The agent uses
+/// systemd; a host without it (a container) can run the daemons as child processes, and
+/// the tests do.
+pub trait Services: Send + Sync {
+    /// `start`, `stop`, `restart`, `enable` or `disable` (the last two also start and
+    /// stop).
+    fn ctl(&self, name: String, action: String) -> Fut<Result<()>>;
+    /// Whether the tunnel runs; `None` when this cannot be known.
+    fn active(&self, name: String) -> Fut<Option<bool>>;
+}
+
+/// The services of a Linux server with systemd: `wormhole@NAME`.
+pub struct Systemd;
+
+impl Services for Systemd {
+    fn ctl(&self, name: String, action: String) -> Fut<Result<()>> {
+        Box::pin(async move {
+            let args = ctl_args(&name, &action)?;
+            let (ok, text) = run("systemctl", &args, Duration::from_secs(30)).await?;
+            if ok {
+                Ok(())
+            } else {
+                bail!("systemctl {action} failed: {}", text.trim())
+            }
+        })
+    }
+
+    #[cfg(target_os = "linux")]
+    fn active(&self, name: String) -> Fut<Option<bool>> {
+        Box::pin(async move {
+            let args = [
+                "is-active".to_owned(),
+                "--quiet".to_owned(),
+                format!("wormhole@{name}"),
+            ];
+            match run("systemctl", &args, Duration::from_secs(3)).await {
+                Ok((ok, _)) => Some(ok),
+                Err(_) => None,
+            }
+        })
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn active(&self, _: String) -> Fut<Option<bool>> {
+        Box::pin(async { None })
+    }
+}
+
+/// Daemons run as child processes of the agent, for hosts without systemd. They stop
+/// with the agent. Cloning is cheap: the clones share the children.
+#[derive(Clone)]
+pub struct Processes {
+    dir: PathBuf,
+    binary: PathBuf,
+    children: std::sync::Arc<std::sync::Mutex<HashMap<String, tokio::process::Child>>>,
+}
+
+/// How long a stopped daemon has to go before the next one starts anyway.
+const STOP_WAIT: Duration = Duration::from_secs(5);
+
+impl Processes {
+    pub fn new(dir: &Path, binary: &Path) -> Self {
+        Self {
+            dir: dir.to_path_buf(),
+            binary: binary.to_path_buf(),
+            children: Default::default(),
+        }
+    }
+
+    fn start(&self, name: &str) -> Result<()> {
+        let mut children = self.children.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(child) = children.get_mut(name) {
+            if matches!(child.try_wait(), Ok(None)) {
+                return Ok(());
+            }
+        }
+        let child = tokio::process::Command::new(&self.binary)
+            .arg("run")
+            .arg("-c")
+            .arg(config_path(&self.dir, name)?)
+            .kill_on_drop(true)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .with_context(|| format!("failed to start {}", self.binary.display()))?;
+        children.insert(name.to_owned(), child);
+        Ok(())
+    }
+
+    /// Kills the daemon and waits until it is gone: a restart that started the next one
+    /// at once could find the tunnel's port still held by the old one, and the new one
+    /// would exit (as `systemctl restart` waits too).
+    async fn stop(&self, name: &str) {
+        let child = self
+            .children
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(name);
+        if let Some(mut child) = child {
+            let _ = child.start_kill();
+            let _ = tokio::time::timeout(STOP_WAIT, child.wait()).await;
+        }
+    }
+}
+
+impl Services for Processes {
+    fn ctl(&self, name: String, action: String) -> Fut<Result<()>> {
+        let this = self.clone();
+        Box::pin(async move {
+            ctl_args(&name, &action)?;
+            match action.as_str() {
+                "start" | "enable" => this.start(&name),
+                "stop" | "disable" => {
+                    this.stop(&name).await;
+                    Ok(())
+                }
+                _ => {
+                    this.stop(&name).await;
+                    this.start(&name)
+                }
+            }
+        })
+    }
+
+    fn active(&self, name: String) -> Fut<Option<bool>> {
+        let running = self
+            .children
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get_mut(&name)
+            .map(|c| matches!(c.try_wait(), Ok(None)));
+        Box::pin(async move { Some(running.unwrap_or(false)) })
+    }
+}
+
+/// Stops the service, then removes the files.
+pub async fn delete(dir: &Path, services: &dyn Services, name: &str) -> Result<()> {
+    config_path(dir, name)?;
+    // A tunnel that was never started has no service to stop; that is not a failure.
+    let _ = services.ctl(name.to_owned(), "disable".to_owned()).await;
+    remove_files(dir, name)
+}
+
+fn text_failed(error: String) -> TextReply {
+    TextReply {
+        ok: false,
+        error: Some(error),
+        text: String::new(),
+    }
+}
+
+pub async fn logs(name: &str, lines: u32) -> TextReply {
+    if !valid_name(name) {
+        return text_failed("bad tunnel name".into());
+    }
+    let args = vec![
+        "-u".to_owned(),
+        format!("wormhole@{name}"),
+        "-n".to_owned(),
+        lines.clamp(1, 1000).to_string(),
+        "--no-pager".to_owned(),
+        "-o".to_owned(),
+        "short-iso".to_owned(),
+    ];
+    match run("journalctl", &args, Duration::from_secs(10)).await {
+        Ok((true, text)) => TextReply {
+            ok: true,
+            error: None,
+            text,
+        },
+        Ok((false, text)) => text_failed(text.trim().to_owned()),
+        Err(e) => text_failed(format!("{e:#}")),
+    }
+}
+
+/// The `wormhole` program: beside this one, or where the installer puts it.
+pub fn wormhole_binary() -> PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| {
+            p.parent()
+                .map(|d| d.join(format!("wormhole{}", std::env::consts::EXE_SUFFIX)))
+        })
+        .filter(|p| p.exists())
+        .unwrap_or_else(|| PathBuf::from("/usr/local/bin/wormhole"))
+}
+
+/// Runs the tunnel's speed test through its running daemon (the control socket, as
+/// `wormhole speedtest` does) and returns the numbers.
+pub async fn speedtest(
+    dir: &Path,
+    name: &str,
+    seconds: u32,
+    streams: u32,
+    udp: bool,
+) -> SpeedReply {
+    speedtest_with(dir, name, seconds, streams, udp, |_: &str| {}).await
+}
+
+/// The entry config of a tunnel and the test's settings, or why there is no test.
+pub fn speedtest_setup(
+    dir: &Path,
+    name: &str,
+    seconds: u32,
+    streams: u32,
+    udp: bool,
+) -> Result<(Config, wormhole::speedtest::Options)> {
+    let path = config_path(dir, name)?;
+    let config = match Config::load(&path) {
+        Ok(c) if c.role == Role::Entry => c,
+        Ok(_) => bail!("the speed test runs on the entry side"),
+        Err(e) => return Err(e),
+    };
+    let options = wormhole::speedtest::Options {
+        seconds: u64::from(seconds.clamp(1, wormhole::speedtest::MAX_SECONDS as u32)),
+        streams: (streams as usize).clamp(1, wormhole::speedtest::MAX_STREAMS),
+        udp,
+    };
+    Ok((config, options))
+}
+
+/// Like [`speedtest`], and every progress line of the test goes to `on_progress` as it comes.
+pub async fn speedtest_with(
+    dir: &Path,
+    name: &str,
+    seconds: u32,
+    streams: u32,
+    udp: bool,
+    on_progress: impl FnMut(&str),
+) -> SpeedReply {
+    let failed = |error: String| SpeedReply {
+        ok: false,
+        error: Some(error),
+        text: String::new(),
+        report: None,
+    };
+    let (config, options) = match speedtest_setup(dir, name, seconds, streams, udp) {
+        Ok(v) => v,
+        Err(e) => return failed(format!("{e:#}")),
+    };
+    let limit = Duration::from_secs(options.seconds * 3 + 40);
+    match tokio::time::timeout(limit, measure(&config, options, on_progress)).await {
+        Ok(Ok(report)) => SpeedReply {
+            ok: true,
+            error: None,
+            text: String::new(),
+            report: Some(report),
+        },
+        Ok(Err(e)) => failed(format!("{e:#}")),
+        Err(_) => failed("the speed test took too long".into()),
+    }
+}
+
+#[cfg(unix)]
+async fn measure(
+    config: &Config,
+    options: wormhole::speedtest::Options,
+    on_progress: impl FnMut(&str),
+) -> Result<wormhole::speedtest::Report> {
+    let socket = config
+        .control_socket()
+        .context("this tunnel has no control socket")?;
+    let connection = wormhole::control::connect(&socket)
+        .await
+        .context("the tunnel is not running")?;
+    Ok(wormhole::control::request(connection, options, on_progress).await?)
+}
+
+#[cfg(not(unix))]
+async fn measure(
+    _: &Config,
+    _: wormhole::speedtest::Options,
+    _: impl FnMut(&str),
+) -> Result<wormhole::speedtest::Report> {
+    bail!("the speed test needs a Linux server")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn spec(name: &str) -> Spec {
+        Spec {
+            name: name.into(),
+            role: "entry".into(),
+            mode: "reverse".into(),
+            transport: "tcpmux".into(),
+            listen: Some("0.0.0.0:3080".into()),
+            token: Some("a".repeat(48)),
+            forwards: vec![ForwardInfo {
+                listen: "0.0.0.0:8443".into(),
+                target: "127.0.0.1:443".into(),
+                protocol: "tcp".into(),
+            }],
+            ..Default::default()
+        }
+    }
+
+    /// A directory that goes away with the test.
+    struct Dir(PathBuf);
+
+    impl Dir {
+        fn new() -> Self {
+            let mut b = [0u8; 8];
+            getrandom::fill(&mut b).unwrap();
+            let p = std::env::temp_dir().join(format!(
+                "wormhole-manage-{}",
+                b.iter().map(|x| format!("{x:02x}")).collect::<String>()
+            ));
+            std::fs::create_dir_all(&p).unwrap();
+            Self(p)
+        }
+    }
+
+    impl Drop for Dir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn names_are_strict() {
+        for good in ["a", "main", "tehran-1", "0x"] {
+            assert!(valid_name(good), "{good}");
+        }
+        for bad in ["", "-a", "A", "a b", "../x", "a/b", "a.b", &"x".repeat(33)] {
+            assert!(!valid_name(bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_spec_makes_a_config_that_reads_back() {
+        let d = Dir::new();
+        put(&d.0, &spec("main")).unwrap();
+        let got = get(&d.0, "main").unwrap();
+        assert_eq!(got.role, "entry");
+        assert_eq!(got.transport, "tcpmux");
+        assert_eq!(got.listen.as_deref(), Some("0.0.0.0:3080"));
+        assert_eq!(got.forwards.len(), 1);
+        assert!(got.token.is_none(), "the token is never handed back");
+        assert_eq!(existing_token(&d.0.join("main.toml")), Some("a".repeat(48)));
+    }
+
+    #[test]
+    fn an_edit_without_a_token_keeps_the_token_and_the_old_file() {
+        let d = Dir::new();
+        put(&d.0, &spec("main")).unwrap();
+        let mut edit = spec("main");
+        edit.token = None;
+        edit.listen = Some("0.0.0.0:3081".into());
+        put(&d.0, &edit).unwrap();
+        assert_eq!(existing_token(&d.0.join("main.toml")), Some("a".repeat(48)));
+        assert!(std::fs::read_to_string(d.0.join("main.toml.bak"))
+            .unwrap()
+            .contains("3080"));
+        let mut fresh = spec("other");
+        fresh.token = None;
+        assert!(put(&d.0, &fresh).is_err(), "a new tunnel needs a token");
+    }
+
+    #[test]
+    fn values_cannot_write_lines_into_the_file() {
+        let d = Dir::new();
+        let mut s = spec("main");
+        s.listen = Some("0.0.0.0:3080\"\n[control]\nsocket = \"/etc/passwd".into());
+        assert!(put(&d.0, &s).is_err());
+        assert!(!d.0.join("main.toml").exists());
+    }
+
+    #[test]
+    fn a_bad_spec_is_refused_with_a_reason() {
+        let d = Dir::new();
+        let mut s = spec("main");
+        s.role = "root".into();
+        let r = check(&d.0, &[], &s);
+        assert!(!r.ok && r.error.is_some());
+        assert!(put(&d.0, &s).is_err());
+        assert!(put(&d.0, &spec("../evil")).is_err());
+        let mut short = spec("main");
+        short.token = Some("abc".into());
+        assert!(put(&d.0, &short).is_err());
+    }
+
+    #[test]
+    fn mux_settings_are_written_and_read_back_and_an_empty_set_writes_nothing() {
+        let d = Dir::new();
+        let mut s = spec("tuned");
+        s.mux = Some(crate::wire::MuxSpec {
+            connections: Some(6),
+            stream_window: Some(512 * 1024),
+            ping_interval_secs: Some(5),
+            coalesce: Some(false),
+            ..Default::default()
+        });
+        put(&d.0, &s).unwrap();
+        let got = get(&d.0, "tuned").unwrap();
+        assert_eq!(got.mux, s.mux);
+        let text = std::fs::read_to_string(d.0.join("tuned.toml")).unwrap();
+        assert!(text.contains("[tunnel.mux]") && text.contains("connections = 6"));
+        // Back to the profile's values.
+        s.mux = Some(Default::default());
+        put(&d.0, &s).unwrap();
+        assert_eq!(get(&d.0, "tuned").unwrap().mux, None);
+        assert!(!std::fs::read_to_string(d.0.join("tuned.toml"))
+            .unwrap()
+            .contains("[tunnel.mux]"));
+        // A value the core refuses is refused here, before anything is written.
+        s.mux = Some(crate::wire::MuxSpec {
+            max_streams: Some(0),
+            ..Default::default()
+        });
+        assert!(put(&d.0, &s).is_err());
+    }
+
+    #[test]
+    fn mux_can_be_turned_off_for_a_transport_that_multiplexes_by_default() {
+        let d = Dir::new();
+        let mut s = spec("plain-ws");
+        s.transport = "ws".into();
+        s.mux = Some(crate::wire::MuxSpec {
+            enabled: Some(false),
+            ..Default::default()
+        });
+        put(&d.0, &s).unwrap();
+        let got = get(&d.0, "plain-ws").unwrap();
+        assert_eq!(got.mux.and_then(|m| m.enabled), Some(false));
+        // tcpmux cannot be turned off: the core refuses it before anything is written.
+        let mut s = spec("bad-tcpmux");
+        s.mux = Some(crate::wire::MuxSpec {
+            enabled: Some(false),
+            ..Default::default()
+        });
+        assert!(put(&d.0, &s).is_err());
+    }
+
+    /// Before the core carries Paqet, `Config::parse` cannot read its transport (and its
+    /// `[tunnel.kcp]`); the tests that need the core say so and skip on that worktree.
+    fn core_knows_paqet() -> bool {
+        Config::parse(
+            "role = \"entry\"\nmode = \"reverse\"\n[tunnel]\n\
+             transport = \"paqet\"\nlisten = \"0.0.0.0:44300\"\n\
+             token = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n",
+        )
+        .is_ok()
+    }
+
+    #[test]
+    fn a_paqet_tunnel_wants_a_tcp_port_and_renders_its_kcp_tuning() {
+        let mut s = spec("raw");
+        s.transport = "paqet".into();
+        s.listen = Some("0.0.0.0:44300".into());
+        s.kcp = Some(KcpSpec {
+            mode: Some("manual".into()),
+            nodelay: Some(true),
+            interval_ms: Some(20),
+            resend: Some(2),
+            no_congestion: Some(false),
+            send_window: Some(2048),
+            recv_window: Some(4096),
+            mtu: Some(1400),
+            fec_data: Some(10),
+            fec_parity: Some(3),
+            datagrams: Some(false),
+        });
+        // Raw TCP: the listening port is a TCP one, not UDP as KCP's own transport is.
+        let wanted = wanted_ports(&s);
+        assert_eq!(wanted[0], ("tcp", 44300), "{wanted:?}");
+        assert!(
+            !wanted.iter().any(|(proto, _)| *proto == "udp"),
+            "{wanted:?}"
+        );
+        let text = render(&s, &"a".repeat(48), None).unwrap();
+        for line in [
+            "transport = \"paqet\"",
+            "[tunnel.kcp]",
+            "mode = \"manual\"",
+            "interval_ms = 20",
+            "send_window = 2048",
+            "recv_window = 4096",
+            "mtu = 1400",
+            "fec_data = 10",
+            "fec_parity = 3",
+            "datagrams = false",
+        ] {
+            assert!(text.contains(line), "{line}: {text}");
+        }
+        // The table is Paqet's alone: another transport does not write it.
+        let mut other = s.clone();
+        other.transport = "kcp".into();
+        assert!(!render(&other, &"a".repeat(48), None)
+            .unwrap()
+            .contains("[tunnel.kcp]"));
+    }
+
+    #[test]
+    fn a_paqet_port_conflict_is_a_tcp_conflict() {
+        if !core_knows_paqet() {
+            eprintln!("skipped: the core in this worktree does not know paqet yet");
+            return;
+        }
+        let d = Dir::new();
+        let mut s = spec("raw");
+        s.transport = "paqet".into();
+        s.listen = Some("0.0.0.0:44300".into());
+        let owners = [owner("tcp", 44300, "nginx"), owner("udp", 44300, "wg")];
+        let r = check(&d.0, &owners, &s);
+        assert!(!r.ok);
+        assert_eq!(r.conflicts.len(), 1, "{r:?}");
+        assert_eq!(r.conflicts[0].proto, "tcp");
+        // Its own listening port is not a conflict on an edit.
+        put(&d.0, &s).unwrap();
+        assert!(check(&d.0, &owners, &s).ok);
+    }
+
+    #[test]
+    fn paqet_kcp_tuning_keeps_only_the_keys_the_file_had() {
+        if !core_knows_paqet() {
+            eprintln!("skipped: the core in this worktree does not know paqet yet");
+            return;
+        }
+        let d = Dir::new();
+        let mut s = spec("raw");
+        s.transport = "paqet".into();
+        s.listen = Some("0.0.0.0:44300".into());
+        // A hand-tuned file: the keys left out must stay left out, not be filled with
+        // defaults the panel happened to see.
+        s.kcp = Some(KcpSpec {
+            mode: Some("manual".into()),
+            interval_ms: Some(30),
+            send_window: Some(2048),
+            mtu: Some(1300),
+            ..Default::default()
+        });
+        put(&d.0, &s).unwrap();
+        let got = get(&d.0, "raw").unwrap();
+        assert_eq!(got.transport, "paqet");
+        assert_eq!(got.kcp, s.kcp);
+        let text = std::fs::read_to_string(d.0.join("raw.toml")).unwrap();
+        assert!(text.contains("[tunnel.kcp]"), "{text}");
+        assert!(!text.contains("recv_window"), "{text}");
+        assert!(!text.contains("datagrams"), "{text}");
+        // An edit without a token keeps the token and the table.
+        let mut edit = got;
+        edit.token = None;
+        edit.kcp.as_mut().unwrap().mtu = Some(1280);
+        put(&d.0, &edit).unwrap();
+        assert_eq!(get(&d.0, "raw").unwrap().kcp.unwrap().mtu, Some(1280));
+        assert_eq!(existing_token(&d.0.join("raw.toml")), Some("a".repeat(48)));
+    }
+
+    #[test]
+    fn only_pem_files_can_be_named_as_a_certificate() {
+        let live = "/etc/letsencrypt/live/wormhole-panel-tun-example-com/";
+        assert!(valid_cert_path(&format!("{live}fullchain.pem")));
+        assert!(valid_cert_path(&format!("{live}privkey.pem")));
+        assert!(lets_encrypt_path(&format!("{live}fullchain.pem")));
+        // The admin's own, wherever they keep them.
+        for own in [
+            "/etc/ssl/wormhole/tun.crt",
+            "/etc/ssl/private/tun.key",
+            "/root/.acme.sh/tun.example.com_ecc/fullchain.cer",
+        ] {
+            assert!(valid_cert_path(own), "{own}");
+            assert!(!lets_encrypt_path(own), "{own}");
+        }
+        for bad in [
+            "/etc/passwd",
+            "/etc/shadow",
+            "/etc/letsencrypt/live/../../shadow.pem",
+            "/etc/letsencrypt/live/x/key.txt",
+            "/etc/letsencrypt/live/x y/key.pem",
+            "/etc/wormhole/main.toml",
+            "/proc/self/environ.pem",
+            "/dev/stdin.key",
+            "//etc/x.pem",
+            "relative.pem",
+        ] {
+            assert!(!valid_cert_path(bad), "{bad}");
+        }
+        for ok in ["tun.example.com", "a-b.example.org", "203.0.113.5"] {
+            assert!(valid_cert_host(ok), "{ok}");
+        }
+        for bad in [
+            "",
+            "localhost",
+            "-a.example.com",
+            "a..com",
+            "a b.com",
+            "x.com/../",
+            "1.2.3",
+            "999.1.1.1",
+            "a.com;rm",
+        ] {
+            assert!(!valid_cert_host(bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_wss_side_can_use_a_real_certificate_and_pins_nothing() {
+        let d = Dir::new();
+        let live = "/etc/letsencrypt/live/wormhole-panel-tun-example-com/";
+        let mut s = spec("real");
+        s.transport = "wss".into();
+        s.tls_cert = Some(format!("{live}fullchain.pem"));
+        s.tls_key = Some(format!("{live}privkey.pem"));
+        let (text, _) = build(&d.0, &s, true).unwrap();
+        assert!(
+            text.contains("fullchain.pem") && text.contains("privkey.pem"),
+            "{text}"
+        );
+        // The files are not on this machine: nothing is written, and no self-signed one is made.
+        let err = put(&d.0, &s).unwrap_err();
+        assert!(format!("{err:#}").contains("certificate files"), "{err:#}");
+        assert!(!d.0.join("real.crt").exists() && !d.0.join("real.toml").exists());
+        // A cert and key go together, and only PEM files.
+        let mut half = s.clone();
+        half.tls_key = None;
+        assert!(build(&d.0, &half, true).is_err());
+        let mut other = s.clone();
+        other.tls_cert = Some("/etc/passwd".into());
+        assert!(build(&d.0, &other, true).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_wss_side_can_use_a_certificate_of_the_admins_own() {
+        let d = Dir::new();
+        let own = d.0.join("own");
+        std::fs::create_dir_all(&own).unwrap();
+        let path = |f: &str| own.join(f).to_string_lossy().into_owned();
+        crate::cert::ensure(&own.join("a.crt"), &own.join("a.key")).unwrap();
+        crate::cert::ensure(&own.join("b.crt"), &own.join("b.key")).unwrap();
+        let mut s = spec("own");
+        s.transport = "wss".into();
+        s.tls_cert = Some(path("a.crt"));
+        s.tls_key = Some(path("a.key"));
+        // Used as it is: nothing is pinned and no certificate is made beside the config.
+        assert_eq!(put(&d.0, &s).unwrap(), None);
+        let text = std::fs::read_to_string(d.0.join("own.toml")).unwrap();
+        assert!(text.contains("a.crt") && text.contains("a.key"), "{text}");
+        assert!(!d.0.join("own.crt").exists());
+        let back = get(&d.0, "own").unwrap();
+        assert_eq!(back.tls_cert.as_deref(), Some(path("a.crt").as_str()));
+        // A key that is not the certificate's is refused before anything is written.
+        let mut wrong = s.clone();
+        wrong.name = "wrong".into();
+        wrong.tls_key = Some(path("b.key"));
+        let err = put(&d.0, &wrong).unwrap_err();
+        assert!(format!("{err:#}").contains("cannot be used"), "{err:#}");
+        assert!(!d.0.join("wrong.toml").exists());
+    }
+
+    #[test]
+    fn the_cipher_is_written_and_read_back_and_auto_writes_nothing() {
+        let d = Dir::new();
+        let mut s = spec("cipher");
+        s.encryption = Some("chacha20-poly1305".into());
+        put(&d.0, &s).unwrap();
+        assert_eq!(
+            get(&d.0, "cipher").unwrap().encryption.as_deref(),
+            Some("chacha20-poly1305")
+        );
+        assert!(std::fs::read_to_string(d.0.join("cipher.toml"))
+            .unwrap()
+            .contains("encryption = \"chacha20-poly1305\""));
+        // Back to auto: the line goes.
+        s.encryption = Some("auto".into());
+        put(&d.0, &s).unwrap();
+        assert_eq!(get(&d.0, "cipher").unwrap().encryption, None);
+        assert!(!std::fs::read_to_string(d.0.join("cipher.toml"))
+            .unwrap()
+            .contains("encryption"));
+        // The core refuses a cipher QUIC cannot have, before anything is written.
+        let mut q = spec("quic-none");
+        q.transport = "quic".into();
+        q.encryption = Some("none".into());
+        assert!(put(&d.0, &q).is_err());
+        assert!(!d.0.join("quic-none.toml").exists());
+    }
+
+    #[test]
+    fn sealed_quic_is_written_and_read_back_and_only_for_quic() {
+        let d = Dir::new();
+        let mut s = spec("sealed");
+        s.transport = "quic".into();
+        s.quic_obfs = true;
+        put(&d.0, &s).unwrap();
+        assert!(get(&d.0, "sealed").unwrap().quic_obfs);
+        let text = std::fs::read_to_string(d.0.join("sealed.toml")).unwrap();
+        assert!(
+            text.contains("[tunnel.quic]") && text.contains("obfs = true"),
+            "{text}"
+        );
+        // Off again: the table goes.
+        s.quic_obfs = false;
+        put(&d.0, &s).unwrap();
+        assert!(!get(&d.0, "sealed").unwrap().quic_obfs);
+        assert!(!std::fs::read_to_string(d.0.join("sealed.toml"))
+            .unwrap()
+            .contains("obfs"));
+        // Over another transport it is not written (the core refuses [tunnel.quic] there).
+        let mut other = spec("tcp-sealed");
+        other.quic_obfs = true;
+        put(&d.0, &other).unwrap();
+        assert!(!get(&d.0, "tcp-sealed").unwrap().quic_obfs);
+        // A spec without it reads as before: the field is left out of what is sent.
+        let json = serde_json::to_string(&get(&d.0, "tcp-sealed").unwrap()).unwrap();
+        assert!(!json.contains("quic_obfs"), "{json}");
+    }
+
+    #[test]
+    fn the_udp_flow_limit_is_written_and_read_back_beside_the_per_address_one() {
+        let d = Dir::new();
+        let mut s = spec("busy");
+        s.udp_max_flows = Some(8192);
+        s.max_conns_per_ip = Some(300);
+        put(&d.0, &s).unwrap();
+        let got = get(&d.0, "busy").unwrap();
+        assert_eq!(
+            (got.udp_max_flows, got.max_conns_per_ip),
+            (Some(8192), Some(300))
+        );
+        let text = std::fs::read_to_string(d.0.join("busy.toml")).unwrap();
+        assert!(
+            text.contains("udp_max_flows = 8192") && text.matches("[tuning]").count() == 1,
+            "{text}"
+        );
+        // The core reads it.
+        let config = wormhole::config::Config::parse(&text).unwrap();
+        assert_eq!(config.tuning().udp.max_flows, 8192);
+        // Left out: no [tuning] at all, and an older agent is not sent the field.
+        s.udp_max_flows = None;
+        s.max_conns_per_ip = None;
+        put(&d.0, &s).unwrap();
+        let text = std::fs::read_to_string(d.0.join("busy.toml")).unwrap();
+        assert!(!text.contains("[tuning]"), "{text}");
+        let json = serde_json::to_string(&get(&d.0, "busy").unwrap()).unwrap();
+        assert!(!json.contains("udp_max_flows"), "{json}");
+    }
+
+    #[test]
+    fn the_per_address_limit_is_written_and_read_back() {
+        let d = Dir::new();
+        let mut s = spec("limited");
+        s.max_conns_per_ip = Some(300);
+        put(&d.0, &s).unwrap();
+        assert_eq!(get(&d.0, "limited").unwrap().max_conns_per_ip, Some(300));
+        let text = std::fs::read_to_string(d.0.join("limited.toml")).unwrap();
+        assert!(
+            text.contains("[tuning]") && text.contains("max_conns_per_ip = 300"),
+            "{text}"
+        );
+        // Off: nothing written, and an older agent is not sent a field it does not know.
+        s.max_conns_per_ip = None;
+        put(&d.0, &s).unwrap();
+        let got = get(&d.0, "limited").unwrap();
+        assert_eq!(got.max_conns_per_ip, None);
+        let json = serde_json::to_string(&got).unwrap();
+        assert!(!json.contains("max_conns_per_ip"), "{json}");
+    }
+
+    #[test]
+    fn the_proxy_header_goes_on_tcp_rules_and_is_read_back() {
+        let d = Dir::new();
+        let mut s = spec("proxied");
+        let rule = |port: u16, protocol: &str| ForwardInfo {
+            listen: format!("0.0.0.0:{port}"),
+            target: "127.0.0.1:443".into(),
+            protocol: protocol.into(),
+        };
+        s.forwards = vec![rule(8443, "tcp"), rule(9443, "tcp+udp"), rule(53, "udp")];
+        s.proxy_protocol = Some("v2".into());
+        put(&d.0, &s).unwrap();
+        assert_eq!(
+            get(&d.0, "proxied").unwrap().proxy_protocol.as_deref(),
+            Some("v2")
+        );
+        let config = Config::load(&d.0.join("proxied.toml")).unwrap();
+        let written: Vec<_> = config.forward.iter().map(|f| f.proxy_protocol).collect();
+        let v2 = Some(wormhole::config::ProxyVersion::V2);
+        assert_eq!(written, [v2, v2, None], "nothing on the UDP rule");
+        // Only v1 or v2: the agent's config check refuses anything else.
+        s.proxy_protocol = Some("v3".into());
+        assert!(put(&d.0, &s).is_err());
+        // Off: nothing written, and an older agent is not sent a field it does not know.
+        s.proxy_protocol = None;
+        put(&d.0, &s).unwrap();
+        let got = get(&d.0, "proxied").unwrap();
+        assert_eq!(got.proxy_protocol, None);
+        let text = std::fs::read_to_string(d.0.join("proxied.toml")).unwrap();
+        assert!(!text.contains("proxy_protocol"), "{text}");
+        let json = serde_json::to_string(&got).unwrap();
+        assert!(!json.contains("proxy_protocol"), "{json}");
+    }
+
+    #[test]
+    fn an_auto_tunnel_wants_its_three_ports() {
+        let mut s = spec("a");
+        s.transport = "auto".into();
+        let own: Vec<_> = wanted_ports(&s)
+            .into_iter()
+            .filter(|(_, p)| *p < 8000)
+            .collect();
+        assert_eq!(own, vec![("tcp", 3080), ("udp", 3080), ("tcp", 3081)]);
+        let (text, _) = build(&Dir::new().0, &s, true).unwrap();
+        assert!(text.contains("transport = \"auto\""));
+    }
+
+    #[test]
+    fn the_wss_side_and_its_pin_render() {
+        let d = Dir::new();
+        let s = Spec {
+            name: "secure".into(),
+            role: "entry".into(),
+            mode: "direct".into(),
+            transport: "wss".into(),
+            remote: Some("203.0.113.5:443".into()),
+            token: Some("b".repeat(48)),
+            ws_path: Some("/x".into()),
+            ws_mode: None,
+            tls_pin: Some("ab".repeat(32)),
+            forwards: vec![ForwardInfo {
+                listen: "0.0.0.0:2222".into(),
+                target: "127.0.0.1:22".into(),
+                protocol: "tcp".into(),
+            }],
+            ..Default::default()
+        };
+        put(&d.0, &s).unwrap();
+        let got = get(&d.0, "secure").unwrap();
+        assert_eq!(got.ws_path.as_deref(), Some("/x"));
+        assert_eq!(got.tls_pin, Some("ab".repeat(32)));
+    }
+
+    #[test]
+    fn a_listening_wss_side_gets_its_own_certificate_and_reports_the_pin() {
+        let d = Dir::new();
+        let s = Spec {
+            name: "secure-exit".into(),
+            role: "exit".into(),
+            mode: "direct".into(),
+            transport: "wss".into(),
+            listen: Some("0.0.0.0:443".into()),
+            token: Some("d".repeat(48)),
+            ws_path: Some("/x".into()),
+            ws_mode: None,
+            ..Default::default()
+        };
+        let pin = put(&d.0, &s).unwrap().expect("a pin");
+        assert_eq!(pin.len(), 64);
+        assert!(d.0.join("secure-exit.crt").exists() && d.0.join("secure-exit.key").exists());
+        // the same certificate on an edit, and the pin can be read back for the other side
+        assert_eq!(put(&d.0, &s).unwrap(), Some(pin.clone()));
+        assert_eq!(get(&d.0, "secure-exit").unwrap().tls_pin, Some(pin));
+        remove_files(&d.0, "secure-exit").unwrap();
+        assert_eq!(std::fs::read_dir(&d.0).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn ports_a_spec_wants() {
+        let mut s = spec("main");
+        s.forwards.push(ForwardInfo {
+            listen: "[::]:5000".into(),
+            target: "127.0.0.1:5000".into(),
+            protocol: "tcp+udp".into(),
+        });
+        assert_eq!(
+            wanted_ports(&s),
+            vec![("tcp", 3080), ("tcp", 8443), ("tcp", 5000), ("udp", 5000)]
+        );
+        s.transport = "kcp".into();
+        assert_eq!(wanted_ports(&s)[0], ("udp", 3080));
+        let mut exit = spec("main");
+        exit.role = "exit".into();
+        exit.forwards.clear();
+        assert!(
+            wanted_ports(&exit).is_empty(),
+            "an exit dials in reverse mode"
+        );
+    }
+
+    fn owner(proto: &str, port: u16, process: &str) -> PortOwner {
+        PortOwner {
+            proto: proto.into(),
+            addr: "0.0.0.0".into(),
+            port,
+            process: Some(process.into()),
+            pid: Some(1),
+        }
+    }
+
+    #[test]
+    fn a_taken_port_is_named_but_the_tunnels_own_is_not_a_conflict() {
+        let d = Dir::new();
+        let owners = [owner("tcp", 8443, "nginx"), owner("udp", 3080, "wg")];
+        let r = check(&d.0, &owners, &spec("main"));
+        assert!(!r.ok);
+        assert_eq!(r.conflicts.len(), 1);
+        assert_eq!(r.conflicts[0].process.as_deref(), Some("nginx"));
+        // once the tunnel exists, its own listening ports are not a conflict on an edit
+        put(&d.0, &spec("main")).unwrap();
+        let held = [
+            owner("tcp", 8443, "wormhole"),
+            owner("tcp", 3080, "wormhole"),
+        ];
+        assert!(check(&d.0, &held, &spec("main")).ok);
+        assert!(!check(&d.0, &held, &spec("second")).ok);
+    }
+
+    #[test]
+    fn proc_net_lines_are_read() {
+        let tcp = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n\
+   0: 0100007F:1F90 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 12345 1 0000000000000000 100 0 0 10 0\n\
+   1: 0100007F:1F91 0100007F:9999 01 00000000:00000000 00:00000000 00000000     0        0 555 1 0000000000000000 100 0 0 10 0\n";
+        assert_eq!(
+            parse_proc_net(tcp, false),
+            vec![("127.0.0.1".to_string(), 8080, 12345)]
+        );
+        let tcp6 = "  sl  local_address                         remote_address                        st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n\
+   0: 00000000000000000000000001000000:0016 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 777 1 0000000000000000 100 0 0 10 0\n";
+        assert_eq!(
+            parse_proc_net(tcp6, false),
+            vec![("::1".to_string(), 22, 777)]
+        );
+        let udp = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode ref pointer drops\n\
+   0: 00000000:0035 00000000:0000 07 00000000:00000000 00:00000000 00000000     0        0 999 2 0000000000000000 0\n";
+        assert_eq!(
+            parse_proc_net(udp, true),
+            vec![("0.0.0.0".to_string(), 53, 999)]
+        );
+    }
+
+    #[test]
+    fn service_actions_are_a_short_list() {
+        assert_eq!(
+            ctl_args("main", "restart").unwrap(),
+            vec!["restart", "wormhole@main"]
+        );
+        assert_eq!(
+            ctl_args("main", "enable").unwrap(),
+            vec!["enable", "--now", "wormhole@main"]
+        );
+        assert!(ctl_args("main", "mask").is_err());
+        assert!(ctl_args("main; reboot", "start").is_err());
+        assert!(ctl_args("a@b", "start").is_err());
+    }
+
+    #[test]
+    fn deleting_removes_every_file() {
+        let d = Dir::new();
+        put(&d.0, &spec("main")).unwrap();
+        put(&d.0, &spec("main")).unwrap();
+        std::fs::write(d.0.join("main.sock"), b"").unwrap();
+        remove_files(&d.0, "main").unwrap();
+        assert_eq!(std::fs::read_dir(&d.0).unwrap().count(), 0);
+        assert!(remove_files(&d.0, "main").is_ok(), "twice is fine");
+    }
+
+    #[test]
+    fn an_old_or_missing_manager_is_replaced_by_this_release_s() {
+        let d = Dir::new();
+        let path = d.0.join("wormhole-manager");
+        assert!(MANAGER_SCRIPT.contains("tunnel-cert) shift && cmd_tunnel_cert"));
+        sync_manager(&path).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), MANAGER_SCRIPT);
+        // One from before `tunnel-cert` only printed its usage to the panel.
+        std::fs::write(
+            &path,
+            "#!/usr/bin/env bash
+echo Usage: wormhole-manager
+",
+        )
+        .unwrap();
+        sync_manager(&path).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), MANAGER_SCRIPT);
+        sync_manager(&path).unwrap();
+        assert!(!d.0.join("wormhole-manager.new").exists());
+    }
+
+    #[test]
+    fn a_lets_encrypt_panel_without_the_heal_timer_gets_it() {
+        let d = Dir::new();
+        let (domain, timer) = (d.0.join("domain"), d.0.join("wormhole-panel-heal.timer"));
+        assert!(MANAGER_SCRIPT.contains("heal-setup)"));
+        // A certificate of your own: the manager keeps no `domain`.
+        assert!(!heal_timer_missing(&domain, &timer));
+        std::fs::write(&domain, "\n").unwrap();
+        assert!(!heal_timer_missing(&domain, &timer));
+        std::fs::write(&domain, "203.0.113.5\n").unwrap();
+        assert!(heal_timer_missing(&domain, &timer));
+        std::fs::write(&timer, "[Timer]\n").unwrap();
+        assert!(!heal_timer_missing(&domain, &timer));
+    }
+}

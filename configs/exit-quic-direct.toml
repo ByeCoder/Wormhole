@@ -1,0 +1,18 @@
+# Exit side (abroad), direct mode over QUIC. Pair: entry-quic-direct.toml.
+# Both sides authenticate each other with keys derived from the token: no certificate
+# files are needed.
+role = "exit"
+mode = "direct"
+profile = "balanced"
+
+[tunnel]
+transport = "quic"
+listen = "0.0.0.0:443"             # UDP port
+token = "CHANGE-ME-run-wormhole-token"
+
+# [tunnel.quic]
+# obfs = true                      # same on both sides: seals every UDP packet, so it does
+                                   # not look like QUIC (28 bytes and some CPU a packet)
+
+[log]
+level = "info"

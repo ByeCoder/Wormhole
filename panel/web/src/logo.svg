@@ -1,0 +1,65 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-labelledby="t">
+  <title id="t">Wormhole</title>
+  <!-- A neon planet with a ring, and a tunnel of light leaping from one side of it to the other. -->
+  <defs>
+    <radialGradient id="sky" cx="0.5" cy="0.4" r="0.8">
+      <stop offset="0" stop-color="#1c0c46"/>
+      <stop offset="0.6" stop-color="#0a0524"/>
+      <stop offset="1" stop-color="#03020c"/>
+    </radialGradient>
+    <radialGradient id="body" cx="0.36" cy="0.32" r="0.8">
+      <stop offset="0" stop-color="#3a2a9a"/>
+      <stop offset="0.55" stop-color="#160b48"/>
+      <stop offset="1" stop-color="#06031c"/>
+    </radialGradient>
+    <radialGradient id="air" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0.78" stop-color="#22f3ff" stop-opacity="0"/>
+      <stop offset="0.86" stop-color="#22f3ff" stop-opacity=".55"/>
+      <stop offset="1" stop-color="#8b5cff" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="neon" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#22f3ff"/>
+      <stop offset="0.5" stop-color="#8b5cff"/>
+      <stop offset="1" stop-color="#ff3fd8"/>
+    </linearGradient>
+    <linearGradient id="beam" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#22f3ff"/>
+      <stop offset="0.5" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#3dffb4"/>
+    </linearGradient>
+    <filter id="glow" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="3.4" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <clipPath id="badge"><rect width="256" height="256" rx="58"/></clipPath>
+    <clipPath id="ball"><circle cx="128" cy="146" r="66"/></clipPath>
+  </defs>
+  <g clip-path="url(#badge)">
+    <rect width="256" height="256" fill="url(#sky)"/>
+    <circle cx="36" cy="40" r="1.8" fill="#bdf6ff" opacity=".85"/>
+    <circle cx="214" cy="34" r="1.4" fill="#ffc6f5" opacity=".8"/>
+    <circle cx="226" cy="120" r="1.2" fill="#ffffff" opacity=".6"/>
+    <circle cx="24" cy="132" r="1.1" fill="#d8ccff" opacity=".6"/>
+    <circle cx="60" cy="226" r="1.3" fill="#bdf6ff" opacity=".5"/>
+    <!-- the ring, far half -->
+    <ellipse cx="128" cy="150" rx="112" ry="26" fill="none" stroke="url(#neon)" stroke-width="5" opacity=".45" transform="rotate(-14 128 150)"/>
+    <!-- the planet -->
+    <circle cx="128" cy="146" r="84" fill="url(#air)"/>
+    <circle cx="128" cy="146" r="66" fill="url(#body)"/>
+    <g clip-path="url(#ball)" fill="none" stroke="#22f3ff" stroke-linecap="round" opacity=".55">
+      <ellipse cx="128" cy="146" rx="66" ry="20" stroke-width="2"/>
+      <ellipse cx="128" cy="118" rx="58" ry="14" stroke-width="1.6" opacity=".7"/>
+      <ellipse cx="128" cy="174" rx="58" ry="14" stroke-width="1.6" opacity=".7"/>
+      <ellipse cx="128" cy="146" rx="24" ry="66" stroke-width="1.6" opacity=".6"/>
+      <ellipse cx="128" cy="146" rx="50" ry="66" stroke-width="1.4" opacity=".45"/>
+    </g>
+    <!-- the ring, near half, over the planet -->
+    <path d="M 19.3 177.1 A 112 26 -14 0 0 236.7 122.9" fill="none" stroke="url(#neon)" stroke-width="6" stroke-linecap="round" filter="url(#glow)"/>
+    <!-- the tunnel: an arc of light from one side of the world to the other -->
+    <path d="M 82 112 Q 128 6 186 124" fill="none" stroke="url(#beam)" stroke-width="7" stroke-linecap="round" filter="url(#glow)"/>
+    <circle cx="82" cy="112" r="7" fill="#ffffff" filter="url(#glow)"/>
+    <circle cx="186" cy="124" r="7" fill="#3dffb4" filter="url(#glow)"/>
+    <circle cx="128" cy="59" r="4" fill="#ffffff" opacity=".95"/>
+  </g>
+  <rect x="1.5" y="1.5" width="253" height="253" rx="56.5" fill="none" stroke="url(#neon)" stroke-opacity=".55" stroke-width="3"/>
+</svg>

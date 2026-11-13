@@ -1,0 +1,242 @@
+/*
+ * Wormhole panel design tokens: neon, glass and depth.
+ * Theme: data-theme="night" (dark, the default) or "dawn" (light) on <html>. Direction: dir="rtl" | "ltr".
+ * Components use only the semantic tokens (--bg, --text, --accent, ...), never raw colours.
+ * Text tokens keep at least 4.5:1 against the page and the glass in both themes.
+ */
+
+/* Fonts: self-hosted (the panel loads nothing from a CDN).
+ * Persian: Kalameh. Latin: Poppins. Code: IBM Plex Mono. */
+@font-face {
+  font-family: "Poppins";
+  font-weight: 300;
+  font-display: swap;
+  src: url("./fonts/Poppins-Light.woff") format("woff");
+}
+@font-face {
+  font-family: "Poppins";
+  font-weight: 400;
+  font-display: swap;
+  src: url("./fonts/Poppins-Regular.woff") format("woff");
+}
+@font-face {
+  font-family: "Poppins";
+  font-weight: 500 600;
+  font-display: swap;
+  src: url("./fonts/Poppins-Medium.woff") format("woff");
+}
+@font-face {
+  font-family: "Poppins";
+  font-weight: 700 900;
+  font-display: swap;
+  src: url("./fonts/Poppins-Bold.woff") format("woff");
+}
+@font-face {
+  font-family: "Kalameh";
+  font-weight: 100 900;
+  font-display: swap;
+  src: url("./fonts/KalamehWeb-Regular.eot");
+  src:
+    url("./fonts/KalamehWeb-Regular.eot?#iefix") format("embedded-opentype"),
+    url("./fonts/KalamehWeb-Regular.woff2") format("woff2"),
+    url("./fonts/KalamehWeb-Regular.woff") format("woff");
+}
+@font-face {
+  font-family: "IBM Plex Mono";
+  font-weight: 400;
+  font-display: swap;
+  src: url("./fonts/IBMPlexMono-400.woff2") format("woff2");
+}
+@font-face {
+  font-family: "IBM Plex Mono";
+  font-weight: 500;
+  font-display: swap;
+  src: url("./fonts/IBMPlexMono-500.woff2") format("woff2");
+}
+
+:root {
+  /* ---- Type ---- */
+  --font-ui: "Poppins", "Kalameh", ui-sans-serif, system-ui, "Segoe UI", sans-serif;
+  --font-display: "Poppins", "Kalameh", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", "Kalameh", ui-monospace, Consolas, monospace;
+
+  --fs-xs: 0.75rem;
+  --fs-sm: 0.875rem;
+  --fs-md: 1rem;
+  --fs-lg: 1.25rem;
+  --fs-xl: 1.75rem;
+  --fs-2xl: 2.5rem;
+  --fs-3xl: 4rem;
+  --lh-tight: 1.2;
+  --lh-body: 1.6;
+  --tracking-caps: 0.14em;
+
+  /* ---- Space (4 px grid) ---- */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 24px;
+  --sp-6: 32px;
+  --sp-7: 48px;
+  --sp-8: 64px;
+
+  /* ---- Shape: soft glass slabs ---- */
+  --r-1: 8px;
+  --r-2: 12px;
+  --r-3: 20px;
+  --r-4: 24px;
+  --r-pill: 999px;
+  --hairline: 1px;
+
+  /* ---- Motion ---- */
+  --dur-micro: 140ms;
+  --dur-short: 220ms;
+  --dur-mid: 340ms;
+  --dur-long: 600ms;
+  --dur-scene: 1400ms;
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-in: cubic-bezier(0.5, 0, 0.75, 0);
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+  --ease-water: cubic-bezier(0.45, 0.05, 0.25, 1);
+
+  /* ---- Neon primitives (from assets/logo.svg) ---- */
+  --neon-cyan: #22f3ff;
+  --neon-violet: #8b5cff;
+  --neon-magenta: #ff3fd8;
+  --neon-mint: #3dffb4;
+  --neon-amber: #ffb547;
+  --neon-red: #ff4d7d;
+  --space-950: #04020d;
+  --space-900: #07041a;
+  --space-850: #0d0828;
+  --space-800: #150e38;
+  --space-700: #22184f;
+
+  --grad-neon: linear-gradient(120deg, var(--neon-cyan), var(--neon-violet) 55%, var(--neon-magenta));
+  --blur-glass: 18px;
+}
+
+/* ---- Dark (default) ---- */
+:root,
+[data-theme="night"] {
+  color-scheme: dark;
+  --sky-top: var(--space-950);
+  --bg: var(--space-900);
+  --stratum-1: rgb(255 255 255 / 0.045);
+  --stratum-2: rgb(255 255 255 / 0.08);
+  --stratum-3: rgb(255 255 255 / 0.13);
+  --earth: #050314;
+
+  --text: #f1efff;
+  --text-2: #b9b5dc;
+  --text-3: #a29ecb;
+
+  --accent: var(--neon-cyan);
+  --accent-strong: #8ff9ff;
+  --accent-2: var(--neon-magenta);
+  --on-accent: #050318;
+  --accent-soft: rgb(34 243 255 / 0.12);
+
+  --water: var(--neon-mint);
+  --water-bright: #a6ffd9;
+  --water-deep: #12c98a;
+  --water-soft: rgb(61 255 180 / 0.13);
+
+  --warn: var(--neon-amber);
+  --danger: var(--neon-red);
+  --danger-soft: rgb(255 77 125 / 0.14);
+
+  --line: rgb(160 150 255 / 0.16);
+  --line-strong: rgb(34 243 255 / 0.5);
+  --focus-ring: 0 0 0 2px var(--bg), 0 0 0 4px var(--accent), 0 0 18px 2px rgb(34 243 255 / 0.55);
+  --shadow-deep: 0 30px 80px -28px rgb(0 0 0 / 0.85);
+  --grain-opacity: 0.04;
+  --star: #bdf6ff;
+
+  --card: rgb(22 14 58 / 0.55);
+  --card-2: rgb(30 20 72 / 0.6);
+  --card-edge: rgb(170 160 255 / 0.18);
+  --card-shadow: inset 0 1px 0 rgb(255 255 255 / 0.09), inset 0 0 0 1px rgb(255 255 255 / 0.02), 0 24px 50px -30px rgb(0 0 0 / 0.9);
+  --backdrop: rgb(4 2 16 / 0.6);
+  --ok: var(--neon-mint);
+  --ok-soft: rgb(61 255 180 / 0.12);
+  --warn-soft: rgb(255 181 71 / 0.14);
+
+  /* glow strengths */
+  --glow-a: rgb(34 243 255 / 0.55);
+  --glow-b: rgb(255 63 216 / 0.45);
+  --glow-c: rgb(139 92 255 / 0.5);
+  --glass-hi: rgb(255 255 255 / 0.14);
+  --glass-lo: rgb(255 255 255 / 0.03);
+  --nebula-a: rgb(139 92 255 / 0.32);
+  --nebula-b: rgb(34 243 255 / 0.16);
+  --nebula-c: rgb(255 63 216 / 0.18);
+  --grid-line: rgb(139 92 255 / 0.13);
+}
+
+/* ---- Light ---- */
+[data-theme="dawn"] {
+  color-scheme: light;
+  --sky-top: #fbfaff;
+  --bg: #f1eeff;
+  --stratum-1: rgb(255 255 255 / 0.55);
+  --stratum-2: rgb(240 236 255 / 0.9);
+  --stratum-3: rgb(222 214 255 / 0.95);
+  --earth: #e6e0ff;
+
+  --text: #150c3a;
+  --text-2: #463d78;
+  --text-3: #4f4682;
+
+  --accent: #5a22e6;
+  --accent-strong: #4313c4;
+  --accent-2: #c5139f;
+  --on-accent: #ffffff;
+  --accent-soft: rgb(90 34 230 / 0.1);
+
+  --water: #00826a;
+  --water-bright: #00a383;
+  --water-deep: #005e4c;
+  --water-soft: rgb(0 130 106 / 0.11);
+
+  --warn: #9a4d00;
+  --danger: #c8124a;
+  --danger-soft: rgb(200 18 74 / 0.09);
+
+  --line: rgb(90 34 230 / 0.14);
+  --line-strong: rgb(90 34 230 / 0.42);
+  --focus-ring: 0 0 0 2px var(--bg), 0 0 0 4px var(--accent), 0 0 16px 2px rgb(90 34 230 / 0.35);
+  --shadow-deep: 0 30px 70px -30px rgb(60 30 160 / 0.35);
+  --grain-opacity: 0.05;
+  --star: #8b5cff;
+
+  --card: rgb(255 255 255 / 0.62);
+  --card-2: rgb(255 255 255 / 0.75);
+  --card-edge: rgb(255 255 255 / 0.9);
+  --card-shadow: inset 0 1px 0 rgb(255 255 255 / 0.95), 0 1px 2px rgb(60 30 160 / 0.06), 0 22px 44px -28px rgb(60 30 160 / 0.4);
+  --backdrop: rgb(40 20 110 / 0.28);
+  --ok: #00826a;
+  --ok-soft: rgb(0 130 106 / 0.1);
+  --warn-soft: rgb(154 77 0 / 0.1);
+
+  --glow-a: rgb(0 200 230 / 0.4);
+  --glow-b: rgb(255 63 216 / 0.32);
+  --glow-c: rgb(90 34 230 / 0.35);
+  --glass-hi: rgb(255 255 255 / 0.95);
+  --glass-lo: rgb(255 255 255 / 0.4);
+  --nebula-a: rgb(139 92 255 / 0.3);
+  --nebula-b: rgb(34 243 255 / 0.22);
+  --nebula-c: rgb(255 63 216 / 0.16);
+  --grid-line: rgb(90 34 230 / 0.16);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --dur-micro: 0ms;
+    --dur-short: 0ms;
+    --dur-mid: 120ms;
+    --dur-long: 160ms;
+    --dur-scene: 240ms;
+  }
+}

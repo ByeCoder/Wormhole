@@ -1,0 +1,324 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Formatting and lints, which fail in seconds: kept apart from the tests, so a mistake
+  # shows before the tests have even built.
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --all-targets -- -D warnings
+      # Builds without the optional transports (cargo features quic and kcp).
+      - run: cargo clippy --lib --bins --no-default-features -- -D warnings
+      - run: cargo clippy --lib --bins --no-default-features --features quic -- -D warnings
+      - run: cargo clippy --lib --bins --no-default-features --features kcp -- -D warnings
+      # The web panel (panel/); without its web app built, the binary embeds a placeholder
+      # page, which is all a lint needs.
+      - run: cargo clippy -p wormhole-panel --all-targets -- -D warnings
+
+  # The core's tests and the panel's run side by side: each takes a few minutes.
+  test-core:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test
+      - name: Paqet over a real Linux raw socket
+        run: |
+          test_bin=$(cargo test --lib --no-run --message-format=json |
+            jq -r 'select(.reason == "compiler-artifact" and .profile.test and .executable != null) | .executable')
+          sudo env WORMHOLE_PAQET_IT=1 "$test_bin" paqet_round_trip_over_raw_ipv4
+
+  test-panel:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # The web app is built first and embedded in the binary.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: panel/web/package-lock.json
+      - run: npm ci && npm run build
+        working-directory: panel/web
+      - run: cargo test -p wormhole-panel
+
+  # The release targets, built the way the release builds them (`cross` for the ARM ones:
+  # Docker images with the C cross-compilers that ring and mimalloc need). The ARM
+  # library tests run under QEMU, so a target-specific break (32-bit atomics, alignment)
+  # shows before a release.
+  cross:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - aarch64-unknown-linux-musl
+          - armv7-unknown-linux-musleabihf
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      # cross builds in a container with this target/ and the registry mounted, so the
+      # cache works as for a native build; one per target.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: panel/web/package-lock.json
+      - run: npm ci && npm run build
+        working-directory: panel/web
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+      - run: cross build --release --locked --target ${{ matrix.target }} -p wormhole -p wormhole-panel
+      - run: ls -l target/${{ matrix.target }}/release/wormhole target/${{ matrix.target }}/release/wormhole-panel
+      - name: Library tests under QEMU
+        run: cross test --locked --target ${{ matrix.target }} --lib
+
+  # scripts/wormhole.sh on a real systemd host: install from a local build, the menu through a
+  # terminal, the panel and an agent, signed releases, updating the panel from the panel. The
+  # tunnels the agent would make are written by hand here (same files, same units).
+  manager:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: shellcheck scripts/*.sh
+      - name: The panel follows a new IP address of its server
+        run: shellcheck -x tests/heal.sh && bash tests/heal.sh
+      - name: The panel's port and a certificate of your own
+        run: shellcheck -x tests/panel_port.sh && bash tests/panel_port.sh
+      - run: cargo build --release --locked -p wormhole -p wormhole-panel
+      - name: Install with the manager
+        run: |
+          sudo scripts/wormhole.sh install --binary target/release/wormhole --panel-binary target/release/wormhole-panel
+          wormhole-manager help >/dev/null
+      - name: Two tunnels by hand, as the agent would write them
+        run: |
+          python3 -m http.server 18081 --bind 127.0.0.1 >/dev/null 2>&1 &
+          tok=$(/usr/local/bin/wormhole token)
+          sudo tee /etc/wormhole/plain.toml >/dev/null <<EOF
+          role = "entry"
+          mode = "reverse"
+          [tunnel]
+          transport = "tcpmux"
+          listen = "127.0.0.1:3080"
+          token = "$tok"
+          [[forward]]
+          listen = "127.0.0.1:18080"
+          target = "127.0.0.1:18081"
+          EOF
+          sudo tee /etc/wormhole/plain-exit.toml >/dev/null <<EOF
+          role = "exit"
+          mode = "reverse"
+          [tunnel]
+          transport = "tcpmux"
+          remote = "127.0.0.1:3080"
+          token = "$tok"
+          EOF
+          sudo sh -c 'chmod 600 /etc/wormhole/*.toml'
+          sudo systemctl enable --now wormhole@plain wormhole@plain-exit
+          sleep 3
+          curl -sf --max-time 5 http://127.0.0.1:18080/ >/dev/null
+      - name: The menu through a real terminal, installed and piped in
+        run: |
+          sudo python3 tests/manager_tty.py wormhole-manager
+          sudo python3 tests/manager_tty.py bash -c 'cat scripts/wormhole.sh | bash'
+      - name: Update restarts running tunnels
+        run: |
+          out=$(sudo wormhole-manager update --binary target/release/wormhole)
+          echo "$out"
+          echo "$out" | grep -q "2 running tunnel(s) restarted"
+          sleep 3
+          curl -sf --max-time 5 http://127.0.0.1:18080/ >/dev/null
+      # The web panel and an agent, through the manager: install, sign in with the link it
+      # prints, make a join code, connect this same machine as an agent, and see it online
+      # with the health `/proc` gives and the tunnels made above.
+      - name: The web panel and an agent through the manager
+        run: |
+          # Let's Encrypt cannot be reached from here: a certificate made for the test.
+          sudo mkdir -p /etc/wormhole-ci
+          sudo openssl req -x509 -newkey rsa:2048 -nodes -keyout /etc/wormhole-ci/key.pem -out /etc/wormhole-ci/cert.pem \
+            -days 2 -subj /CN=127.0.0.1 -addext subjectAltName=IP:127.0.0.1 2>/dev/null
+          sudo wormhole-manager panel install --port 28443 --host 127.0.0.1 \
+            --cert-file /etc/wormhole-ci/cert.pem --key-file /etc/wormhole-ci/key.pem | tee panel.txt
+          grep -q "certificate" panel.txt
+          link=$(grep -o 'https://[^ ]*#t=[0-9a-f]*' panel.txt)
+          base=${link%%#*}
+          token=${link##*#t=}
+          curl -skf "$base" | grep -q Wormhole
+          test "$(curl -sk -o /dev/null -w '%{http_code}' https://127.0.0.1:28443/nothing)" = 404
+          curl -sk -c jar -H 'Content-Type: application/json' -d "{\"token\":\"$token\"}" "${base}api/link" | tee signin.json
+          csrf=$(sed -n 's/.*"csrf":"\([0-9a-f]*\)".*/\1/p' signin.json)
+          test -n "$csrf"
+          code=$(curl -sk -b jar -H "X-Wormhole-CSRF: $csrf" -H 'Content-Type: application/json' \
+            -d '{"name":"ci-agent","host":"127.0.0.1"}' "${base}api/servers/join-code" |
+            sed -n 's/.*"code":"\([^"]*\)".*/\1/p')
+          test -n "$code"
+          sudo WORMHOLE_NO_UPDATE_CHECK=1 wormhole-manager --agent "$code"
+          for _ in $(seq 1 30); do
+            curl -sk -b jar "${base}api/servers" > servers.json
+            jq -e '.servers[] | select(.name == "ci-agent" and .online)' servers.json >/dev/null && break
+            sleep 1
+          done
+          cat servers.json
+          jq -e '.servers[] | select(.name == "ci-agent" and .online)' servers.json >/dev/null
+          grep -q '"name":"plain"' servers.json
+          grep -Eq '"mem_total":[0-9]+' servers.json
+          # a login link works once
+          curl -sk -H 'Content-Type: application/json' -d "{\"token\":\"$token\"}" "${base}api/link" | grep -q wrong
+          # the update restarts the panel and the agent
+          out=$(sudo wormhole-manager update --binary target/release/wormhole --panel-binary target/release/wormhole-panel)
+          echo "$out" | grep -q "Restarted wormhole-panel"
+          echo "$out" | grep -q "Restarted wormhole-agent"
+      # The manager checks release signatures with openssl and the key in the script; here a
+      # key made for the test is pinned, since only the release workflow has the real one.
+      - name: Release signatures
+        run: |
+          kp=target/release/wormhole-panel
+          d=$(mktemp -d)
+          n=wormhole-v0.11.0-x86_64-linux
+          out=$($kp release-key --out "$d/key")
+          pem=$(printf '%s\n' "$out" | sed -n '/BEGIN PUBLIC KEY/,/END PUBLIC KEY/p')
+          hexkey=$(printf '%s\n' "$out" | sed -n 's/^public key (hex): //p')
+          echo "an archive" > "$d/$n.tar.gz"
+          (cd "$d" && sha256sum "$n.tar.gz" > "$n.tar.gz.sha256")
+          WORMHOLE_SIGNING_KEY=$(cat "$d/key") $kp release-sign "$d/$n.tar.gz.sha256"
+          $kp release-verify --key "$hexkey" "$d/$n.tar.gz"
+          check() { WORMHOLE_RELEASE_KEY_PEM="$pem" bash -c 'source scripts/wormhole.sh; verify_signature "$@"' _ "$@"; }
+          check "$d" "$n" v0.11.0
+          # the release's own key (built in) does not accept a signature made with another
+          if bash -c 'source scripts/wormhole.sh; verify_signature "$@"' _ "$d" "$n" v0.11.0; then exit 1; fi
+          # a checksum file that was changed after signing
+          cp -r "$d" "$d-t"
+          echo x >> "$d-t/$n.tar.gz.sha256"
+          if check "$d-t" "$n" v0.11.0; then echo "a changed checksum file passed" >&2; exit 1; fi
+          # a signed archive put under another name (another CPU's)
+          m=wormhole-v0.11.0-aarch64-linux
+          mkdir "$d-n"
+          for e in tar.gz tar.gz.sha256 tar.gz.sig; do cp "$d/$n.$e" "$d-n/$m.$e"; done
+          if check "$d-n" "$m" v0.11.0; then echo "a swapped archive passed" >&2; exit 1; fi
+          # no signature: fine for a release before 0.11 (with a warning), refused from 0.11
+          rm "$d/$n.tar.gz.sig"
+          check "$d" "$n" v0.10.0
+          if check "$d" "$n" v0.11.0; then echo "an unsigned 0.11 passed" >&2; exit 1; fi
+      # Updating the panel from the panel, on this systemd host: a second panel is built that
+      # calls itself 99.0.0, a local server plays the releases (signed with a key made for the
+      # test), and the panel must roll back a release that does not come up and take a good one.
+      - name: Update the panel from the panel
+        run: |
+          shellcheck tests/update_e2e.sh
+          cp target/release/wormhole-panel /tmp/wormhole-panel-old
+          WORMHOLE_BUILD_VERSION=99.0.0 cargo build --release --locked -p wormhole-panel
+          cp target/release/wormhole-panel /tmp/wormhole-panel-new
+          sudo bash tests/update_e2e.sh /tmp/wormhole-panel-new target/release/wormhole
+      - name: Banner in the journal, priority prefixes understood
+        run: |
+          sudo journalctl -u wormhole@plain -o cat --no-pager | tee journal.txt | head -20
+          grep -q "developed by ByeCoder" journal.txt
+          ! grep -q '^<[0-9]>' journal.txt
+      - name: Remove and uninstall
+        run: |
+          sudo systemctl disable --now wormhole@plain wormhole@plain-exit
+          sudo wormhole-manager agent remove
+          sudo wormhole-manager panel uninstall --yes
+          test ! -e /etc/wormhole-panel/panel.toml
+          test ! -e /usr/local/bin/wormhole-panel
+          sudo wormhole-manager uninstall --yes
+          test ! -e /usr/local/bin/wormhole
+      - if: failure()
+        run: sudo journalctl -u 'wormhole@*' -u wormhole-panel -u wormhole-agent --no-pager -n 200
+
+  # Private networks (phase 13): two network namespaces play two servers, and the agent's
+  # GRE code (`wormhole-panel net`) links them: the private addresses answer, two links between
+  # the same pair work at once, a filtered GRE path fails the test, `net down` removes it.
+  gre:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: shellcheck tests/gre_ns.sh
+      - run: cargo build -p wormhole -p wormhole-panel
+      - run: sudo bash tests/gre_ns.sh target/debug/wormhole-panel target/debug/wormhole
+      - name: Paqet TCP and UDP forwarding across Linux network namespaces
+        run: |
+          shellcheck tests/paqet_ns.sh
+          sudo bash tests/paqet_ns.sh target/debug/wormhole
+
+  # The panel the way a person uses it: Playwright drives a real browser against a real panel
+  # and a real agent (tunnels run as child processes, so no systemd is needed here). It covers
+  # signing in, adding a server, making, editing, stopping and deleting a tunnel with traffic
+  # through it, a tunnel that cannot connect being undone, the look in both languages and
+  # themes, and axe (WCAG 2.1 A and AA) on every page and dialog.
+  browser:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: panel/web/package-lock.json
+      - run: npm ci && npm run build
+        working-directory: panel/web
+      - run: cargo build -p wormhole -p wormhole-panel
+      - run: npx playwright install --with-deps chromium
+        working-directory: panel/web
+      - run: npx playwright test
+        working-directory: panel/web
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-test-results
+          path: panel/web/e2e-results
+          retention-days: 7
+
+  # Known vulnerabilities in the dependencies (RustSec's advisory database). It runs on the
+  # lock file, so it also catches an advisory published after the last change.
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      - run: cargo audit
+
+  # nginx in front of the tunnel as a stand-in for a CDN: WebSocket proxying, TLS
+  # termination and an idle timeout (tests/tunnel.rs, module `nginx`).
+  cdn:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y nginx-light
+      - run: cargo test --test tunnel nginx -- --nocapture
+        env:
+          WORMHOLE_REQUIRE_NGINX: "1"
+          WORMHOLE_NGINX: /usr/sbin/nginx

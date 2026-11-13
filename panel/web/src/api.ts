@@ -1,0 +1,782 @@
+// The panel's JSON API. Addresses are relative, so the app works under any secret path.
+
+import type { UsageSettings } from "./calendar";
+
+/** What a server or tunnel moved in some time, in bytes (`crate::usage::Row`). */
+export interface UsageRow {
+  rx: number;
+  tx: number;
+  /** The users' bytes, on every leg they cross. */
+  data: number;
+  /** What the tunnel adds on its link: encryption, framing, handshakes, pings. */
+  proto: number;
+  /** Sent again: TCP retransmissions, KCP resends, FEC parity. */
+  resend: number;
+  /** IP, TCP/UDP, link-layer and GRE/VXLAN headers. */
+  headers: number;
+  /** The users' own bytes each way, once. */
+  up: number;
+  down: number;
+  /** Of rx + tx, what is estimated (a server older than the wire counters). */
+  est: number;
+}
+
+export interface UsageTotals {
+  since: number | null;
+  all: UsageRow;
+  marks: UsageRow[];
+}
+
+export interface Quota {
+  limit: number;
+  count: "both" | "tx" | "rx";
+  reset_day: number;
+  warn: number;
+}
+
+export interface QuotaState extends Quota {
+  used: number;
+  period_start: number;
+  period_end: number;
+}
+
+export interface UsageSummary {
+  settings: UsageSettings;
+  servers: Record<string, { own: UsageTotals; tunnels: UsageTotals; quota: QuotaState | null }>;
+  tunnels: Record<string, UsageTotals>;
+  /** By tunnel, then by server id: each side apart. */
+  sides: Record<string, Record<string, UsageTotals>>;
+}
+
+export type UsageOf = "server" | "server-tunnels" | "tunnel";
+
+export interface UsageSeries {
+  since: number | null;
+  all: UsageRow;
+  settings: UsageSettings;
+  rows: [number, UsageRow][];
+}
+
+export interface SessionInfo {
+  authenticated: boolean;
+  has_password: boolean;
+  csrf?: string;
+}
+
+export interface Health {
+  cpu_pct: number | null;
+  mem_total: number | null;
+  mem_used: number | null;
+  rx_bps: number | null;
+  tx_bps: number | null;
+  uptime_secs: number | null;
+  load1: number | null;
+  /** IPv4 networks the server already routes. */
+  routes?: string[];
+}
+
+/** The entry side's health probe (2.4): a connection made the way a user's is, to the target. */
+export interface ProbeStatus {
+  outcome: "ok" | "target_failed" | "failed" | "unsupported";
+  ms: number | null;
+  /** Empty: the tunnel alone (only UDP forwarded). */
+  target: string;
+  error: string | null;
+  fails: number;
+  target_fails: number;
+  ok_total: number;
+  failed_total: number;
+  secs_ago: number;
+}
+
+/** What the panel keeps about a tunnel: the name it is shown by, and its place in the list. */
+export interface TunnelMeta {
+  label?: string;
+  position?: number;
+}
+
+export interface TunnelStatus {
+  /** Seconds the daemon has run. */
+  uptime_secs?: number;
+  peer: {
+    /** Seconds since the link came up this time; null while down. */
+    connected_secs?: number | null;
+    connected: boolean;
+    transport?: string | null;
+    sessions: number | null;
+    rtt_ms: number | null;
+    last_error: { secs_ago: number; text: string } | null;
+    /** With mux (2.4): streams in use and how many the live connections take. */
+    streams?: number | null;
+    streams_max?: number | null;
+    /** New connections that failed because every connection was full. */
+    full?: number;
+  };
+  totals: { bytes_up: number; bytes_down: number; tcp_open: number; udp_flows: number };
+  forwards?: { listen: string; open_failures: number; refused_per_ip?: number }[];
+  probe?: ProbeStatus | null;
+}
+
+export interface TunnelInfo {
+  name: string;
+  role: string;
+  mode: string;
+  transport: string;
+  profile: string;
+  /** The tunnel's cipher setting; empty from an older agent. */
+  encryption?: string;
+  listen: string | null;
+  remote: string | null;
+  forwards: { listen: string; target: string; protocol: string }[];
+  active: boolean | null;
+  status: TunnelStatus | null;
+  error: string | null;
+  rate_mbps: number | null;
+  /** The panel's label and place for it (put here by the page from `tunnel_meta`). */
+  meta?: TunnelMeta;
+}
+
+export interface Latency {
+  sent: number;
+  received: number;
+  p50_ms: number;
+  p99_ms: number;
+  jitter_ms: number;
+}
+
+export interface Rate {
+  mbps: number;
+  peak_mbps: number;
+  bytes: number;
+}
+
+/** What a speed test measured (`wormhole::speedtest::Report`). */
+/** One thing a benchmark measures: a transport, over a path, in a direction. */
+export interface BenchCandidate {
+  key: string;
+  /** The core transport: tcpmux, kcp, ws, wss or quic. */
+  transport: string;
+  /** public, ipv6 (the public IPv6 addresses), or gre (across the private network link between the two servers). */
+  path: "public" | "ipv6" | "gre" | "vxlan";
+  /** The server name a wss candidate sends (none: none, as for an IP address); missing in an older result. */
+  sni?: string | null;
+  network: string | null;
+  /** reverse (the entry listens) or direct (the exit listens). */
+  mode: "reverse" | "direct";
+  listener: string;
+  host: string;
+  port: number | null;
+  state: "wait" | "probe" | "speed" | "ok" | "fail" | "skip";
+  connect_ms: number | null;
+  latency: Latency | null;
+  download_mbps: number | null;
+  upload_mbps: number | null;
+  loaded: Latency | null;
+  score: number | null;
+  parts: { speed: number; latency: number; stability: number } | null;
+  error: string | null;
+}
+
+/** A benchmark run between two servers. */
+export interface Bench {
+  id: string;
+  entry: string;
+  exit: string;
+  profile: string;
+  state: "probe" | "speed" | "done" | "stopped" | "failed";
+  /** Unix milliseconds. */
+  started: number;
+  finished: number | null;
+  candidates: BenchCandidate[];
+  best: string | null;
+  error: string | null;
+  /** Whether IPv6 was measured: "tested", or "missing:ID" (that server has no public IPv6 address); missing in an older result. */
+  ipv6?: string | null;
+}
+
+export interface SpeedReport {
+  seconds: number;
+  streams: number;
+  idle: Latency;
+  download: Rate;
+  download_latency: Latency;
+  upload: Rate;
+  upload_latency: Latency;
+  udp: Latency | null;
+  notes: string[];
+}
+
+/** A speed test's answer; an older agent sends only `text`. */
+export interface SpeedResult {
+  ok: boolean;
+  error: string | null;
+  text: string;
+  report?: SpeedReport | null;
+}
+
+/** A speed test that runs in the background (`start`), and what it has said since (`poll`). */
+export interface SpeedStart {
+  ok: boolean;
+  error: string | null;
+  id: string;
+}
+export interface SpeedPoll {
+  ok: boolean;
+  error: string | null;
+  /** The progress lines of `wormhole::speedtest::run`, after the ones already seen. */
+  lines: string[];
+  next: number;
+  done: boolean;
+  report: SpeedReport | null;
+}
+
+/** How an agent reaches the panel: `auto` tries every transport in turn. */
+export type LinkTransport = "auto" | "tcpmux" | "kcp" | "wss" | "quic";
+
+/** How a private network's links are made. */
+export type LinkKind = "gre" | "vxlan";
+
+/** Whether a benchmark path goes across a private network link (GRE or VXLAN). */
+export const isPrivatePath = (path: string) => path === "gre" || path === "vxlan";
+
+/** "GRE" or "VXLAN", as a label. */
+export const kindLabel = (kind: LinkKind | undefined) => (kind === "vxlan" ? "VXLAN" : "GRE");
+
+/** The panel's address on a private (GRE or VXLAN) network link to another server: what that server's agent can dial. */
+export interface GreAddr {
+  link: string;
+  network: string;
+  /** The other server (id). */
+  server: string;
+  addr: string;
+  peer_addr: string;
+  kind?: LinkKind;
+}
+
+export interface PanelAddresses {
+  v4: string | null;
+  v6: string | null;
+  agent_port: number | null;
+  gre?: GreAddr[];
+  /** The panel server's public IPv4 address as private network links use it, if it is known. */
+  gre_local?: string | null;
+  /** ...and its IPv6 one, for links over IPv6. */
+  gre_local6?: string | null;
+}
+
+/** Where the panel dials a server it connects to (reverse): its agent listens on `port` and the next one. */
+export interface ReverseTarget {
+  host: string;
+  port: number;
+  /** The one link transport; none: all of them in turn. */
+  transport?: string | null;
+}
+
+/** A GRE link the panel is to make to a server: its public IPv4 address, and the network that gives the addresses (none: the first, or a new one). */
+export interface NewGreLink {
+  ip: string;
+  network?: string;
+  /** Without a network, the first one of this kind (or a new one). */
+  kind?: LinkKind;
+}
+
+/** What *Add server* over a private network made: the server (waiting for its agent) and its code. */
+export interface GreJoin {
+  code: string;
+  valid_for: number;
+  id: string;
+  name: string;
+  /** The private network the link's addresses come from. */
+  network: string;
+  /** The panel's end of the link (what the agent dials) and the new server's. */
+  panel_addr: string;
+  server_addr: string;
+  kind?: LinkKind;
+}
+
+export interface LinkError {
+  at: number;
+  /** `link_ended`: the link dropped or went quiet. `wrong_key`: an agent came with this server's id and a key that does not match. */
+  kind: "link_ended" | "wrong_key";
+  detail: string;
+}
+
+/** An automatic restart of a tunnel (by name) or of the running tunnels of a server (by id). */
+export interface ScheduleRow {
+  kind: "tunnel" | "server";
+  subject: string;
+  mode: "every" | "daily";
+  every_secs: number;
+  /** For `daily`: minutes after midnight, UTC. */
+  daily_min: number;
+  enabled: boolean;
+  since: number;
+  last_run: number;
+  /** `ok`, `ok:N`, `skipped_offline`, `skipped_stopped`, `skipped_none`, `busy`, `missed`, or `failed:` and why. */
+  last_result: string;
+  next_run: number | null;
+}
+
+export interface ScheduleBody {
+  kind: "tunnel" | "server";
+  subject: string;
+  mode: "every" | "daily";
+  every_secs?: number;
+  daily_min?: number;
+  enabled: boolean;
+}
+
+export interface ServerInfo {
+  id: string;
+  name: string;
+  local: boolean;
+  online: boolean;
+  version: string;
+  arch: string;
+  hostname: string;
+  /** The address other servers reach it at (private networks), if one was set. */
+  addr: string | null;
+  /** The address it is known by (public IPv4, else IPv6): what private networks use until one is set. */
+  addr_default?: string | null;
+  /** The same for links over IPv6: the IPv6 address that was set, and the one used until one is. */
+  addr6?: string | null;
+  addr6_default?: string | null;
+  seen_secs: number | null;
+  /** When the panel last heard from it (unix seconds), also from before the panel started. */
+  last_seen?: number | null;
+  /** Why its link last ended or was refused, until it connects again. */
+  last_error?: LinkError | null;
+  /** The private network link its agent connects through, when it does. */
+  gre?: { link: string; network: string; kind?: LinkKind } | null;
+  /** Where the panel dials it, for a server the panel connects to (reverse). */
+  reverse?: ReverseTarget | null;
+  /** An agents port of its own its agent dials, if it has one. */
+  agent_port?: number | null;
+  /** The transport its agent's link uses now (tcpmux or kcp). */
+  link?: string | null;
+  health: Health | null;
+  /** Its public IPv4 and IPv6 addresses, when known. */
+  ip4?: string | null;
+  ip6?: string | null;
+  tunnels: TunnelInfo[];
+}
+
+export interface SessionRow {
+  id: number;
+  ip: string;
+  agent: string;
+  created: number;
+  last_seen: number;
+  current: boolean;
+}
+
+export interface ForwardSpec {
+  listen: string;
+  target: string;
+  protocol: string;
+}
+
+/** A Paqet tunnel's native KCP wire (`[tunnel.kcp]`); what is left out keeps the profile's value. */
+export interface KcpSpec {
+  mode?: "normal" | "fast" | "fast2" | "fast3" | "manual";
+  /** Manual mode only. */
+  nodelay?: boolean;
+  interval_ms?: number;
+  resend?: number;
+  no_congestion?: boolean;
+  /** In packets. */
+  send_window?: number;
+  recv_window?: number;
+  /** KCP packet size, its 24-byte header included. */
+  mtu?: number;
+  /** 0/0 turns FEC off; left out keeps the profile's default. */
+  fec_data?: number;
+  fec_parity?: number;
+  /** UDP flows take the datagram path beside KCP. */
+  datagrams?: boolean;
+}
+
+/** What the wizard sends: one tunnel, both sides. */
+/** A tunnel's mux settings; what is left out keeps the profile's value. */
+export interface MuxSpec {
+  /** Only ever false: mux off for ws, wss or kcp. */
+  enabled?: boolean;
+  connections?: number;
+  max_streams?: number;
+  /** Bytes. */
+  stream_window?: number;
+  max_lifetime_secs?: number;
+  ping_interval_secs?: number;
+  coalesce?: boolean;
+  /** auto only: sessions over tcpmux, kcp and ws at the same time, connections spread over them. */
+  spread?: boolean;
+}
+
+/** A `spoof` tunnel's forged addresses for one side (they differ per side). */
+export interface SpoofSpec {
+  /** This side's forged source address (one); exclusive with spoof_ips. */
+  spoof_ip?: string;
+  /** This side's forged source addresses, used round-robin. */
+  spoof_ips?: string[];
+  /** The source the peer forges (receive filter only). */
+  peer_spoof_ip?: string;
+  /** The peer's real address, where replies go (required on the listening side). */
+  peer_ip?: string;
+  /** The forged TCP source port; left out: the tunnel's real port. */
+  port?: number;
+}
+
+/** A spoof tunnel's per-side forged addresses, as the wizard collects them. */
+export interface SpoofPair {
+  entry: SpoofSpec;
+  exit: SpoofSpec;
+}
+
+export interface PairRequest {
+  name: string;
+  entry: string;
+  exit: string;
+  mode: string;
+  transport: string;
+  profile?: string;
+  listen: string;
+  dial: string;
+  pool?: number;
+  ws_path?: string;
+  /** ws / wss: `httpupgrade`, or `tls` for wss; left out: WebSocket frames. */
+  ws_mode?: string;
+  ws_host?: string;
+  tls_sni?: string;
+  mux?: MuxSpec;
+  /** Paqet only: `[tunnel.kcp]` tuning. */
+  kcp?: KcpSpec;
+  /** spoof only: each side's forged addresses. */
+  spoof?: SpoofPair;
+  /** wss: the files of a real certificate on the listening side. */
+  tls_cert?: string;
+  tls_key?: string;
+  /** wss with a real certificate: the name it was issued for, which the dialing side checks it against. */
+  tls_host?: string;
+  /** `auto` (left out), `aes-256-gcm`, `chacha20-poly1305` or `none`. */
+  encryption?: string;
+  /** quic: seal every UDP packet with a key from the token (`[tunnel.quic] obfs`). */
+  quic_obfs?: boolean;
+  /** The entry side's limit of open connections per client address; left out or 0: none. */
+  max_conns_per_ip?: number;
+  /** The entry side's UDP flows (clients) per port; left out: the default (4096). */
+  udp_max_flows?: number;
+  /** `v1` or `v2`: the target gets a PROXY header with each user's address on every TCP port; left out: none. */
+  proxy_protocol?: string;
+  forwards: ForwardSpec[];
+  rotate?: boolean;
+  /** Direct mode: run over this private GRE network (its id). */
+  network?: string;
+}
+
+/** One side of a tunnel as an agent keeps it (never with its token). */
+export interface Spec {
+  name: string;
+  role: string;
+  mode: string;
+  transport: string;
+  profile?: string;
+  listen?: string;
+  remote?: string;
+  pool?: number;
+  ws_path?: string;
+  /** ws / wss: `httpupgrade`, or `tls` for wss; left out: WebSocket frames. */
+  ws_mode?: string;
+  ws_host?: string;
+  tls_sni?: string;
+  tls_pin?: string;
+  mux?: MuxSpec;
+  /** Paqet only: the `[tunnel.kcp]` table that was in the file. */
+  kcp?: KcpSpec;
+  /** spoof only: this side's `[tunnel.spoof]`. */
+  spoof?: SpoofSpec;
+  tls_cert?: string;
+  tls_key?: string;
+  encryption?: string;
+  quic_obfs?: boolean;
+  max_conns_per_ip?: number;
+  udp_max_flows?: number;
+  proxy_protocol?: string;
+  forwards: ForwardSpec[];
+}
+
+export interface PortOwner {
+  proto: string;
+  addr: string;
+  port: number;
+  process: string | null;
+  pid: number | null;
+}
+
+export interface CheckReply {
+  ok: boolean;
+  error?: string;
+  warnings: string[];
+  conflicts: PortOwner[];
+}
+
+export interface Step {
+  id: string;
+  state: "run" | "ok" | "fail";
+  detail: string | null;
+}
+
+export interface Op {
+  id: string;
+  kind: "create" | "edit" | "control" | "delete";
+  name: string;
+  state: "running" | "done" | "failed";
+  steps: Step[];
+  error: string | null;
+  undone: boolean | null;
+  /** Servers that could not be reached and were left out. */
+  offline?: string[];
+}
+
+export interface EventRow {
+  id: number;
+  at: number;
+  kind: string;
+  subject: string;
+  detail: string;
+}
+
+export interface LogLine {
+  server: string;
+  role: string;
+  text: string;
+}
+
+export interface Network {
+  id: string;
+  name: string;
+  cidr: string;
+  /** GRE, or VXLAN over UDP `port` (0 for GRE). */
+  kind: LinkKind;
+  port: number;
+  /** Its links run between the servers' IPv6 addresses (unless one was made otherwise). */
+  ipv6?: boolean;
+  created: number;
+  links: number;
+  capacity: number;
+}
+
+export interface Link {
+  id: string;
+  network: string;
+  a: string;
+  b: string;
+  subnet: string;
+  addr_a: string;
+  addr_b: string;
+  /** The GRE key, or for VXLAN the VNI. */
+  gre_key: number;
+  ifname: string;
+  kind: LinkKind;
+  port: number;
+  /** 0: the most a 1500-byte path allows. `mtu_how`: `measured`, `set` (by hand) or empty. */
+  mtu: number;
+  mtu_how: "" | "measured" | "set";
+  /** It runs between its servers' IPv6 addresses (ip6gre, or VXLAN over IPv6). */
+  ipv6?: boolean;
+}
+
+/** A link's MTU after a change: `path` is what was measured; `later` get it when they connect. */
+export interface MtuSet {
+  mtu: number;
+  how: Link["mtu_how"];
+  path: number | null;
+  later: string[];
+}
+
+/** A deleted link or network: gone from the panel; `later` remove its interfaces when they can. */
+export interface NetDeleted {
+  later: string[];
+}
+
+export interface UpdateStatus {
+  current: string;
+  configured: boolean;
+  channel: "stable" | "beta";
+  auto: boolean;
+  state: "none" | "newer" | "same" | "older";
+  major: boolean;
+  latest: { tag: string; version: string; notes: string; prerelease: boolean } | null;
+  checked_at: number | null;
+  error: string | null;
+  last_result: { version: string; ok: boolean; rolled_back: boolean; error: string | null; at: number } | null;
+  busy: boolean;
+  /** Servers whose agent is older than this panel. */
+  outdated: { id: string; name: string; version: string; online: boolean }[];
+}
+
+/** The Telegram bot's settings as the panel shows them: the token itself is never sent. */
+export interface TelegramView {
+  enabled: boolean;
+  token_set: boolean;
+  token_tail: string;
+  chats: { id: number; name: string }[];
+  lang: "fa" | "en";
+  servers: boolean;
+  tunnels: boolean;
+  server_grace: number;
+  tunnel_grace: number;
+  digest_hours: number;
+  api_base: string;
+  proxy: string;
+  connect_via: string;
+  muted_until: number | null;
+  pair: { code: string; expires_in: number } | null;
+  last_ok: number | null;
+  last_error: string | null;
+}
+
+export type TelegramChange = Partial<
+  Pick<TelegramView, "enabled" | "lang" | "servers" | "tunnels" | "server_grace" | "tunnel_grace" | "digest_hours" | "api_base" | "proxy" | "connect_via">
+> & { token?: string; remove_token?: boolean };
+
+export class ApiError extends Error {
+  status: number;
+  code: string;
+  body: Record<string, unknown>;
+  constructor(status: number, body: Record<string, unknown>) {
+    super(String(body.error ?? status));
+    this.status = status;
+    this.code = String(body.error ?? "error");
+    this.body = body;
+  }
+}
+
+let csrf = "";
+
+export function setCsrf(value: string | undefined) {
+  csrf = value ?? "";
+}
+
+async function call<T>(method: string, path: string, body?: unknown): Promise<T> {
+  const headers: Record<string, string> = {};
+  if (body !== undefined) headers["Content-Type"] = "application/json";
+  if (method !== "GET" && csrf) headers["X-Wormhole-CSRF"] = csrf;
+  const response = await fetch(`./api/${path}`, {
+    method,
+    headers,
+    credentials: "same-origin",
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  let data: Record<string, unknown> = {};
+  try {
+    data = await response.json();
+  } catch {
+    // an empty or non-JSON answer
+  }
+  if (!response.ok) throw new ApiError(response.status, data);
+  return data as T;
+}
+
+export const api = {
+  session: () => call<SessionInfo>("GET", "session"),
+  login: (password: string) => call<{ csrf: string }>("POST", "login", { password }),
+  loginWithLink: (token: string) => call<{ csrf: string }>("POST", "link", { token }),
+  logout: () => call<object>("POST", "logout"),
+  /** `tunnel_meta`: the names tunnels are shown by and their places, by tunnel name (missing from an older panel). */
+  servers: () => call<{ servers: ServerInfo[]; agents: boolean; tunnel_meta?: Record<string, TunnelMeta> }>("GET", "servers"),
+  /** With `port`, the server gets an agents port of its own (and is listed now, waiting for its agent). */
+  joinCode: (name: string | undefined, host: string, transport: LinkTransport, port?: number) =>
+    call<{ code: string; valid_for: number; id?: string; name?: string; port?: number }>("POST", "servers/join-code", { name, host, transport, port }),
+  panelAddresses: () => call<PanelAddresses>("GET", "servers/panel-addresses"),
+  /** With `port`, the server's agent dials an agents port of its own across the link. */
+  joinGre: (name: string | undefined, ip: string, network: string | undefined, transport: LinkTransport, kind: LinkKind = "gre", port?: number) =>
+    call<GreJoin>("POST", "servers/join-gre", { name, ip, network, transport, kind, port }),
+  /** `net_left`: the server was offline, so the private network interfaces the panel made there stay on it. */
+  removeServer: (id: string) => call<{ net_left?: boolean }>("POST", "servers/remove", { id }),
+  /** With `gre`, a GRE link to the server is made first and the link to the panel goes across it (the answer then says what was made). */
+  /** `port`: the agents port its agent dials (the panel's own clears a port of its own; left out: unchanged). */
+  reconnectServer: (id: string, host: string, transport: LinkTransport, reverse?: { host: string; port: number }, gre?: NewGreLink, port?: number) =>
+    call<{ code: string; valid_for: number } & Partial<GreJoin>>("POST", "servers/reconnect", { id, host, transport, reverse, gre, port }),
+  /** With `gre`, the panel makes a GRE link to the new server and dials it across that link (`host` is not used). */
+  joinReverse: (name: string | undefined, host: string, port: number, transport: LinkTransport, gre?: NewGreLink) =>
+    call<{ code: string; valid_for: number; id: string; name: string } & Partial<GreJoin>>("POST", "servers/join-reverse", { name, host, port, transport, gre }),
+  renameServer: (id: string, name: string) => call<object>("POST", "servers/rename", { id, name }),
+  /** Every server's id once (the panel's own, `local`, too), in the order every list shows them. */
+  orderServers: (ids: string[]) => call<object>("POST", "servers/order", { ids }),
+  /** The name a tunnel is shown by (empty: its own name again); its own name stays. */
+  labelTunnel: (name: string, label: string) => call<object>("POST", "tunnels/label", { name, label }),
+  /** Tunnel names in the order the Tunnels page lists them; the ones left out come after. */
+  orderTunnels: (names: string[]) => call<object>("POST", "tunnels/order", { names }),
+  schedules: () => call<{ schedules: ScheduleRow[] }>("GET", "schedules"),
+  setSchedule: (body: ScheduleBody) => call<object>("POST", "schedules", body),
+  deleteSchedule: (kind: string, subject: string) => call<object>("POST", "schedules/delete", { kind, subject }),
+  runSchedule: (kind: string, subject: string) => call<object>("POST", "schedules/run", { kind, subject }),
+  sessions: () => call<{ sessions: SessionRow[] }>("GET", "sessions"),
+  revoke: (id: number) => call<object>("POST", "sessions/revoke", { id }),
+  changePassword: (current: string | undefined, next: string) =>
+    call<object>("POST", "password", { current, new: next }),
+  tunnelCert: (server: string, host: string, email?: string) =>
+    call<{ ok: boolean; error: string | null; cert: string | null; key: string | null }>("POST", "tunnels/cert", { server, host, email }),
+  tunnelCheck: (body: PairRequest) => call<{ entry: CheckReply; exit: CheckReply }>("POST", "tunnels/check", body),
+  createTunnel: (body: PairRequest) => call<{ op: string }>("POST", "tunnels", body),
+  editTunnel: (body: PairRequest) => call<{ op: string }>("POST", "tunnels/edit", body),
+  controlTunnel: (name: string, action: "start" | "stop" | "restart") => call<{ op: string }>("POST", "tunnels/control", { name, action }),
+  deleteTunnel: (name: string) => call<{ op: string }>("POST", "tunnels/delete", { name }),
+  tunnelSpec: (server: string, name: string) =>
+    call<Spec>("GET", `tunnel?server=${encodeURIComponent(server)}&name=${encodeURIComponent(name)}`),
+  op: (id: string) => call<Op>("GET", `op?id=${encodeURIComponent(id)}`),
+  ports: (server: string) => call<{ ports: PortOwner[] }>("GET", `ports?server=${encodeURIComponent(server)}`),
+  history: (key: string, range: string) => call<{ points: [number, number][] }>("GET", `history?key=${encodeURIComponent(key)}&range=${range}`),
+  events: (limit = 100) => call<{ events: EventRow[] }>("GET", `events?limit=${limit}`),
+  logs: (name: string, lines = 200) => call<{ lines: LogLine[] }>("GET", `logs?name=${encodeURIComponent(name)}&lines=${lines}`),
+  benchStart: (entry: string, exit: string, profile: string, port: number, sni?: string) =>
+    call<{ id: string }>("POST", "bench", { entry, exit, profile, port, ...(sni ? { sni } : {}) }),
+  benchState: (id: string) => call<Bench>("GET", `bench?id=${encodeURIComponent(id)}`),
+  benchStop: (id: string) => call<object>("POST", "bench/stop", { id }),
+  benchLast: (entry: string, exit: string) => call<{ bench: Bench | null }>("GET", `bench/last?entry=${encodeURIComponent(entry)}&exit=${encodeURIComponent(exit)}`),
+  speedtestStart: (name: string, seconds: number, streams: number, udp: boolean) =>
+    call<SpeedStart>("POST", "tunnels/speedtest/start", { name, seconds, streams, udp }),
+  speedtestStop: (name: string, id: string) => call<{ ok: boolean }>("POST", "tunnels/speedtest/stop", { name, id }),
+  speedtestPoll: (name: string, id: string, after: number) => call<SpeedPoll>("POST", "tunnels/speedtest/poll", { name, id, after }),
+  speedtest: (name: string, seconds: number, streams: number, udp: boolean) =>
+    call<SpeedResult>("POST", "tunnels/speedtest", { name, seconds, streams, udp }),
+  backup: (passphrase: string) => call<{ data: string }>("POST", "backup", { passphrase }),
+  restore: (passphrase: string, data: string, replace: boolean) => call<{ servers: number; restart: boolean }>("POST", "restore", { passphrase, data, replace }),
+  networks: () => call<{ networks: Network[]; links: Link[] }>("GET", "networks"),
+  createNetwork: (name: string, cidr: string, kind: LinkKind = "gre", port?: number, ipv6 = false) =>
+    call<Network>("POST", "networks", { name, cidr, kind, ipv6, ...(kind === "vxlan" && port ? { port } : {}) }),
+  /** With `links`, the network's links go too. `later`: the servers that remove the interfaces when they can (offline, or no answer yet). */
+  deleteNetwork: (id: string, links = false, force = false) => call<NetDeleted>("POST", "networks/delete", { id, links, force }),
+  /** `ipv6`: between the servers' IPv6 addresses (left out: as the network's links are). */
+  createLinks: (network: string, servers: string[], hub?: string, ipv6?: boolean) => call<{ op: string }>("POST", "networks/links", { network, servers, hub, ipv6 }),
+  /** Moves a link between its servers' IPv4 and IPv6 addresses (an operation to follow). */
+  setLinkFamily: (id: string, ipv6: boolean) => call<{ op: string }>("POST", "networks/links/family", { id, ipv6 }),
+  /** `force`: delete a link that an offline server's agent reaches the panel through. */
+  deleteLink: (id: string, force = false) => call<NetDeleted>("POST", "networks/links/delete", { id, force }),
+  /** `measure`: measure the path again; else `mtu` (0: the default). */
+  setLinkMtu: (id: string, choice: { measure: true } | { mtu: number }) => call<MtuSet>("POST", "networks/links/mtu", { id, ...choice }),
+  /** `v6`: the IPv6 address for links over IPv6 (else the address of IPv4 links). Empty: back to the one it is known by. */
+  setAddress: (id: string, addr: string, v6 = false) => call<object>("POST", "servers/address", { id, addr, v6 }),
+  update: () => call<UpdateStatus>("GET", "update"),
+  checkUpdate: () => call<UpdateStatus>("POST", "update/check", {}),
+  updateSettings: (body: { channel?: "stable" | "beta"; auto?: boolean }) => call<UpdateStatus>("POST", "update/settings", body),
+  telegram: () => call<TelegramView>("GET", "telegram"),
+  telegramSet: (body: TelegramChange) => call<TelegramView>("POST", "telegram", body),
+  telegramPair: () => call<TelegramView>("POST", "telegram/pair", {}),
+  telegramRemoveChat: (id: number) => call<TelegramView>("POST", "telegram/chats/remove", { id }),
+  telegramTest: () => call<{ ok: boolean; bot?: string; error?: string }>("POST", "telegram/test", {}),
+  applyUpdate: (confirm_major: boolean) => call<{ op: string }>("POST", "update/apply", { confirm_major }),
+  updateServers: (restart_tunnels: boolean) => call<{ op: string }>("POST", "update/servers", { restart_tunnels }),
+  newLink: () => call<{ token: string; valid_for: number }>("POST", "links"),
+  /** Usage over `from..to` (unix seconds), in 15-minute (`quarter`) or day buckets. */
+  usage: (of: UsageOf, id: string, from: number, to: number, step: "quarter" | "day") =>
+    call<UsageSeries>("GET", `usage?of=${of}&id=${encodeURIComponent(id)}&from=${from}&to=${to}&step=${step}`),
+  /** Every server's and tunnel's totals, and since each of `marks`. */
+  usageSummary: (marks: number[]) => call<UsageSummary>("GET", `usage/summary?marks=${marks.join(",")}`),
+  /** Starts counting again from now: a server (with `tunnels`, its tunnels too) or a tunnel. */
+  usageReset: (body: { server: string; tunnels?: boolean } | { tunnel: string }) => call<object>("POST", "usage/reset", body),
+  /** `limit` 0 removes the quota. */
+  usageQuota: (server: string, quota: Quota) => call<{ quota: QuotaState | null }>("POST", "usage/quota", { server, ...quota }),
+  usageSettings: () => call<UsageSettings>("GET", "usage/settings"),
+  setUsageSettings: (s: UsageSettings) => call<UsageSettings>("POST", "usage/settings", s),
+};

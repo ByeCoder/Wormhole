@@ -1,0 +1,124 @@
+name: Release
+
+# Pushing a tag like v0.2.0 builds static Linux binaries for x86_64, aarch64 and armv7
+# and publishes a GitHub release with the notes of that version from CHANGELOG.md.
+# One archive per architecture, named wormhole-<tag>-<arch>-linux.tar.gz, each with its
+# SHA-256 (scripts/wormhole.sh downloads them by those names).
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - arch: x86_64
+            target: x86_64-unknown-linux-musl
+            cross: false
+          - arch: aarch64
+            target: aarch64-unknown-linux-musl
+            cross: true
+          - arch: armv7
+            target: armv7-unknown-linux-musleabihf
+            cross: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tag matches the version in Cargo.toml
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "tag $GITHUB_REF_NAME does not match Cargo.toml version $version" >&2
+            exit 1
+          fi
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      # The panel's web app is built first; the binary embeds panel/web/dist.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: panel/web/package-lock.json
+      - run: npm ci && npm run build
+        working-directory: panel/web
+      - if: ${{ !matrix.cross }}
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - if: ${{ !matrix.cross }}
+        run: cargo build --release --locked --target ${{ matrix.target }} -p wormhole -p wormhole-panel
+      - if: ${{ matrix.cross }}
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+      - if: ${{ matrix.cross }}
+        run: cross build --release --locked --target ${{ matrix.target }} -p wormhole -p wormhole-panel
+      - name: Package
+        run: |
+          name="wormhole-$GITHUB_REF_NAME-${{ matrix.arch }}-linux"
+          mkdir "$name"
+          cp "target/${{ matrix.target }}/release/wormhole" "target/${{ matrix.target }}/release/wormhole-panel" README.md README_FA.md CHANGELOG.md "$name/"
+          cp -r configs systemd scripts assets "$name/"
+          tar czf "$name.tar.gz" "$name"
+          sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wormhole-${{ matrix.arch }}
+          path: |
+            wormhole-*.tar.gz
+            wormhole-*.tar.gz.sha256
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: wormhole-*
+          merge-multiple: true
+      - name: Three archives, each with its checksum
+        run: |
+          ls -l wormhole-*
+          test "$(ls wormhole-*.tar.gz | wc -l)" = 3
+          for f in wormhole-*.tar.gz; do sha256sum -c "$f.sha256"; done
+      # Releases are signed: the private key is the repository secret
+      # WORMHOLE_SIGNING_KEY, and every signature is checked with the public key built into
+      # the program before anything is published, so a wrong secret stops the release.
+      - name: Sign the checksums
+        env:
+          WORMHOLE_SIGNING_KEY: ${{ secrets.WORMHOLE_SIGNING_KEY }}
+        run: |
+          if [ -z "$WORMHOLE_SIGNING_KEY" ]; then
+            echo "::error::the repository secret WORMHOLE_SIGNING_KEY is not set: releases must be signed"
+            exit 1
+          fi
+          tar -xzf wormhole-*-x86_64-linux.tar.gz --wildcards '*/wormhole-panel' --strip-components=1
+          for f in wormhole-*.tar.gz.sha256; do ./wormhole-panel release-sign "$f"; done
+          for f in wormhole-*.tar.gz; do ./wormhole-panel release-verify "$f"; done
+          ls -l wormhole-*.sig
+      - name: Release notes from CHANGELOG.md
+        run: |
+          awk -v version="${GITHUB_REF_NAME#v}" '
+            index($0, "## " version " ") == 1 { found = 1; next }
+            found && /^## / { exit }
+            found { print }
+          ' CHANGELOG.md > notes.md
+          test -s notes.md
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # A version with a dash (v0.8.0-beta) is a prerelease: GitHub's "latest release",
+          # which `wormhole-manager install` and `update` use, stays on the last stable one.
+          flags=()
+          case "$GITHUB_REF_NAME" in *-*) flags=(--prerelease) ;; esac
+          gh release create "$GITHUB_REF_NAME" --title "Wormhole $GITHUB_REF_NAME" "${flags[@]}" \
+            --notes-file notes.md wormhole-*.tar.gz wormhole-*.tar.gz.sha256 wormhole-*.tar.gz.sig

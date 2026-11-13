@@ -1,0 +1,25 @@
+# Entry side (Iran), direct mode through a CDN, with HTTPUpgrade: the CDN sees the same
+# WebSocket upgrade as with wss, but after it the tunnel's bytes go with no WebSocket
+# framing (no masking, no frame headers): less CPU on both servers. Pair:
+# exit-httpupgrade-cdn.toml. Both servers need 1.1.0 or newer.
+role = "entry"
+mode = "direct"
+profile = "balanced"
+
+[tunnel]
+transport = "wss"
+remote = "104.16.0.1:443"          # a clean CDN IP, or "tunnel.example.com:443"
+token = "CHANGE-ME-run-wormhole-token"
+
+[tunnel.ws]
+mode = "httpupgrade"               # same on both sides
+path = "/api/v1/upload"            # same on both sides
+host = "tunnel.example.com"        # your proxied domain; also the TLS server name (SNI)
+early_data = true                  # hello inside the upgrade request: one round trip less
+
+[[forward]]
+listen = "0.0.0.0:443"
+target = "127.0.0.1:443"           # dialed on the exit side
+
+[log]
+level = "info"

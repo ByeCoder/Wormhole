@@ -1,0 +1,24 @@
+# Exit side, direct mode, wss with a self-signed certificate. Pair: entry-wss-direct.toml.
+# Make a certificate, for example:
+#   openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 3650 \
+#     -subj "/CN=www.example.com" -addext "subjectAltName=DNS:www.example.com" \
+#     -keyout /etc/wormhole/key.pem -out /etc/wormhole/cert.pem
+# then put the output of `wormhole pin /etc/wormhole/cert.pem` into the entry's pin_sha256.
+role = "exit"
+mode = "direct"
+profile = "balanced"
+
+[tunnel]
+transport = "wss"
+listen = "0.0.0.0:443"
+token = "CHANGE-ME-run-wormhole-token"
+
+[tunnel.ws]
+path = "/ws"
+
+[tunnel.tls]
+cert = "/etc/wormhole/cert.pem"
+key = "/etc/wormhole/key.pem"
+
+[log]
+level = "info"

@@ -1,0 +1,15 @@
+[Unit]
+Description=Wormhole agent (connects this server to a Wormhole panel)
+Documentation=https://github.com/ByeCoder/Wormhole
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/wormhole-panel agent -c /etc/wormhole-panel/agent.toml
+Restart=always
+RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
