@@ -362,6 +362,11 @@ impl PairRequest {
         if self.sealed() && !version_at_least(version, (1, 0, 0)) {
             bail!("old_agent_obfs:{id}:{version}");
         }
+        // Spreading over auto's transports came with 1.0.0. An older agent refuses the
+        // field (checked before the general one below, so the message names it), on either side (both get the same `[tunnel.mux]`).
+        if self.spread() && !release_at_least(version, SPREAD_SINCE) {
+            bail!("old_agent_spread:{id}:{version}");
+        }
         if self.needs_new_servers() && !version_at_least(version, (1, 0, 0)) {
             bail!("old_agent:{id}:{version}");
         }
@@ -396,11 +401,6 @@ impl PairRequest {
             && !release_at_least(version, OWN_CERT_SINCE)
         {
             bail!("old_agent_cert:{id}:{version}");
-        }
-        // Spreading over auto's transports came with 1.0.0. An older agent refuses the
-        // field, on either side (both get the same `[tunnel.mux]`).
-        if self.spread() && !release_at_least(version, SPREAD_SINCE) {
-            bail!("old_agent_spread:{id}:{version}");
         }
         // The spoof transport came with 1.0.0; both sides take part.
         if self.is_spoof() && !release_at_least(version, SPOOF_SINCE) {

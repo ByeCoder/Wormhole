@@ -234,6 +234,7 @@ async fn links_are_made_on_both_servers_reused_undone_and_protected() {
         forwards: Vec::new(),
         rotate: false,
         network,
+        spoof: None,
     };
     let mut made = None;
     let direct = pair::over_network(

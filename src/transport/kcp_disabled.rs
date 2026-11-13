@@ -30,6 +30,10 @@ impl KcpParams {
     pub fn new_paqet(_: &TunnelConfig, _: crate::config::KcpConfig) -> Self {
         Self
     }
+
+    pub fn new_spoof(_: &TunnelConfig, _: crate::config::KcpConfig) -> Self {
+        Self
+    }
 }
 
 pub enum KcpListener {}

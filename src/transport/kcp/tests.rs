@@ -12,6 +12,7 @@ fn params(key: u8) -> KcpParams {
         config: KcpConfig::default(),
         key: [key; 32],
         carrier: CarrierKind::Udp,
+        spoof: None,
     }
 }
 
@@ -272,6 +273,7 @@ fn params_paqet(key: u8) -> KcpParams {
         config: KcpConfig::default(),
         key: [key; 32],
         carrier: CarrierKind::Paqet,
+        spoof: None,
     }
 }
 
