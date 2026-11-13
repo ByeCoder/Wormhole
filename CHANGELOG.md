@@ -30,6 +30,13 @@ layers above them are unchanged. Both servers need 1.2.0.
   ALPN `h2` is a planned follow-up. No root; IPv4 or IPv6. In the panel: pick *gRPC* as the
   transport. Sample configs: `configs/entry-grpc.toml`, `configs/exit-grpc.toml`. Guide:
   [Transports](docs/transports.md#grpc).
+- **`xhttp`** — the tunnel streamed over one ordinary HTTP/1.1 request and response with
+  chunked bodies (like XHTTP in Xray), for paths that pass only HTTP or that sit behind an
+  HTTP CDN/proxy. A stream transport like `tcp`/`ws`, with no new dependency (the HTTP is
+  written and parsed directly). Cleartext HTTP/1.1 in this phase, so run it behind a
+  TLS-terminating front; native TLS is a planned follow-up. No root; IPv4 or IPv6. In the
+  panel: pick *XHTTP* as the transport. Sample configs: `configs/entry-xhttp.toml`,
+  `configs/exit-xhttp.toml`. Guide: [Transports](docs/transports.md#xhttp).
 
 ## 1.1.0 - 2026-11-13
 

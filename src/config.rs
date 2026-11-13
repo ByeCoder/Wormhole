@@ -95,6 +95,9 @@ pub enum TransportKind {
     /// A tunnel stream carried as a bidirectional gRPC call over HTTP/2, to pass through
     /// CDNs and reverse proxies that speak gRPC. A stream transport, like `tcp` and `ws`.
     Grpc,
+    /// The tunnel streamed over an ordinary HTTP/1.1 request and response with chunked
+    /// bodies (like XHTTP in Xray). A stream transport, like `tcp` and `ws`.
+    Xhttp,
 }
 
 impl TransportKind {
@@ -112,6 +115,7 @@ impl TransportKind {
             Self::Icmp => "icmp",
             Self::Dns => "dns",
             Self::Grpc => "grpc",
+            Self::Xhttp => "xhttp",
         }
     }
 

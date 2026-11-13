@@ -372,6 +372,16 @@ impl Setup {
         }
     }
 
+    /// xhttp: the tunnel streamed over an HTTP/1.1 request/response with chunked bodies. A
+    /// stream transport like tcp/ws (TCP underneath).
+    const fn xhttp(mode: &'static str) -> Self {
+        Self {
+            transport: "xhttp",
+            mux: true,
+            ..Self::tcp(mode)
+        }
+    }
+
     const fn no_mux(self) -> Self {
         Self { mux: false, ..self }
     }
@@ -972,6 +982,9 @@ tunnel_tests! {
     grpc_reverse: Setup::grpc("reverse");
     grpc_direct: Setup::grpc("direct");
     grpc_reverse_no_mux: Setup::grpc("reverse").no_mux();
+    xhttp_reverse: Setup::xhttp("reverse");
+    xhttp_direct: Setup::xhttp("direct");
+    xhttp_reverse_no_mux: Setup::xhttp("reverse").no_mux();
     auto_reverse: Setup::tcp("reverse").transport("auto").mux();
     auto_direct: Setup::tcp("direct").transport("auto").mux();
 }

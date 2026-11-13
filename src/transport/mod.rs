@@ -27,6 +27,7 @@ mod quic_wire;
 pub mod tcp;
 pub mod tls;
 pub mod ws;
+pub mod xhttp;
 
 use std::io;
 use std::net::SocketAddr;
@@ -88,6 +89,7 @@ pub enum Listener {
     Kcp(kcp::KcpListener),
     #[cfg(feature = "grpc")]
     Grpc(tcp::TcpTransportListener),
+    Xhttp(tcp::TcpTransportListener),
 }
 
 impl Listener {
@@ -130,6 +132,10 @@ impl Listener {
         if settings.kind == TransportKind::Grpc {
             return Err(grpc_not_built());
         }
+        if settings.kind == TransportKind::Xhttp {
+            let tcp = tcp::TcpTransportListener::bind(addr, tuning).await?;
+            return Ok(Self::Xhttp(tcp));
+        }
         let tcp = tcp::TcpTransportListener::bind(addr, tuning).await?;
         match settings.kind {
             TransportKind::Quic
@@ -139,6 +145,7 @@ impl Listener {
             | TransportKind::Icmp
             | TransportKind::Dns
             | TransportKind::Grpc
+            | TransportKind::Xhttp
             | TransportKind::Auto => unreachable!("handled above"),
             TransportKind::Tcp | TransportKind::Tcpmux => Ok(Self::Tcp(tcp)),
             TransportKind::Ws | TransportKind::Wss => Ok(Self::Ws(
@@ -178,6 +185,10 @@ impl Listener {
                 let (s, peer) = l.accept().await?;
                 Ok((Incoming::Grpc(link_guard(&s), s, peer), peer))
             }
+            Self::Xhttp(l) => {
+                let (s, peer) = l.accept().await?;
+                Ok((Incoming::Xhttp(link_guard(&s), s, peer), peer))
+            }
         }
     }
 
@@ -187,6 +198,7 @@ impl Listener {
             Self::Kcp(l) => l.local_addr(),
             #[cfg(feature = "grpc")]
             Self::Grpc(l) => l.local_addr(),
+            Self::Xhttp(l) => l.local_addr(),
         }
     }
 }
@@ -205,6 +217,7 @@ pub enum Incoming {
     Kcp(kcp::KcpStream),
     #[cfg(feature = "grpc")]
     Grpc(TcpGuard, TcpStream, SocketAddr),
+    Xhttp(TcpGuard, TcpStream, SocketAddr),
 }
 
 impl Incoming {
@@ -224,6 +237,15 @@ impl Incoming {
                     guard,
                     grpc::GrpcStream::new(reader, writer),
                 ))
+            }
+            Self::Xhttp(guard, mut stream, _peer) => {
+                let read_ahead = xhttp::server_handshake(&mut stream).await?;
+                let (r, w) = stream.into_split();
+                let stream = xhttp::XhttpStream::new(
+                    xhttp::XhttpReader::new(r, read_ahead),
+                    xhttp::XhttpWriter::new(w),
+                );
+                Ok(TunnelStream::Xhttp(guard, stream))
             }
             Self::Ws {
                 guard,
@@ -270,6 +292,7 @@ pub enum Dialer {
     Kcp(kcp::KcpDialer),
     #[cfg(feature = "grpc")]
     Grpc(tcp::TcpTransportDialer, String),
+    Xhttp(tcp::TcpTransportDialer, String),
 }
 
 /// WebSocket part of a [`Dialer`].
@@ -302,6 +325,9 @@ impl Dialer {
         if settings.kind == TransportKind::Grpc {
             return Err(grpc_not_built());
         }
+        if settings.kind == TransportKind::Xhttp {
+            return Ok(Self::Xhttp(tcp, addr.to_string()));
+        }
         let ws = settings.ws.as_ref();
         let (config, tls) = match settings.kind {
             TransportKind::Tcp | TransportKind::Tcpmux => return Ok(Self::Tcp(tcp)),
@@ -311,7 +337,8 @@ impl Dialer {
             | TransportKind::Spoof
             | TransportKind::Icmp
             | TransportKind::Dns
-            | TransportKind::Grpc => {
+            | TransportKind::Grpc
+            | TransportKind::Xhttp => {
                 unreachable!("handled above")
             }
             TransportKind::Ws => (ws::ClientConfig::new(ws, addr, "http", 80), None),
@@ -369,6 +396,21 @@ impl Dialer {
                     guard,
                     grpc::GrpcStream::new(reader, writer),
                 ))
+            }
+            Self::Xhttp(d, host) => {
+                let mut stream = d.dial().await?;
+                let guard = link_guard(&stream);
+                let read_ahead = xhttp::client_handshake(&mut stream, host).await?;
+                let (r, w) = stream.into_split();
+                let mut out = xhttp::XhttpStream::new(
+                    xhttp::XhttpReader::new(r, read_ahead),
+                    xhttp::XhttpWriter::new(w),
+                );
+                if !first.is_empty() {
+                    out.write_all(first).await?;
+                    out.flush().await?;
+                }
+                Ok(TunnelStream::Xhttp(guard, out))
             }
             Self::Ws(d, ws) => {
                 let stream = d.dial().await?;
@@ -501,6 +543,7 @@ pub enum TunnelStream {
     Kcp(kcp::KcpStream),
     #[cfg(feature = "grpc")]
     Grpc(TcpGuard, grpc::GrpcStream),
+    Xhttp(TcpGuard, xhttp::XhttpStream),
 }
 
 impl TunnelStream {
@@ -511,6 +554,7 @@ impl TunnelStream {
             Self::Tcp(..) | Self::Ws(..) | Self::Wss(..) => None,
             #[cfg(feature = "grpc")]
             Self::Grpc(..) => None,
+            Self::Xhttp(..) => None,
         }
     }
 
@@ -521,6 +565,7 @@ impl TunnelStream {
             Self::Tcp(..) | Self::Kcp(_) => return Ok(()),
             #[cfg(feature = "grpc")]
             Self::Grpc(..) => return Ok(()),
+            Self::Xhttp(..) => return Ok(()),
             Self::Ws(_, s) => s.reader().has_early(),
             Self::Wss(_, s) => s.reader().has_early(),
         };
@@ -538,6 +583,7 @@ impl TunnelStream {
             Self::Tcp(..) | Self::Kcp(_) => false,
             #[cfg(feature = "grpc")]
             Self::Grpc(..) => false,
+            Self::Xhttp(..) => false,
             Self::Ws(_, s) => s.reject_upgrade(),
             Self::Wss(_, s) => s.reject_upgrade(),
         }
@@ -555,6 +601,7 @@ impl TunnelStream {
             Self::Kcp(s) => s.is_alive(),
             #[cfg(feature = "grpc")]
             Self::Grpc(_, s) => s.is_alive(),
+            Self::Xhttp(_, s) => s.is_alive(),
             // Anything from the peer (even a ping) means the connection is not idle.
             Self::Ws(_, s) => {
                 !s.reader().has_buffered() && would_block(s.reader().get_ref().try_read(&mut probe))
@@ -591,6 +638,7 @@ impl AsyncRead for TunnelStream {
             Self::Kcp(s) => Pin::new(s).poll_read(cx, buf),
             #[cfg(feature = "grpc")]
             Self::Grpc(_, s) => Pin::new(s).poll_read(cx, buf),
+            Self::Xhttp(_, s) => Pin::new(s).poll_read(cx, buf),
         }
     }
 }
@@ -608,6 +656,7 @@ impl AsyncWrite for TunnelStream {
             Self::Kcp(s) => Pin::new(s).poll_write(cx, buf),
             #[cfg(feature = "grpc")]
             Self::Grpc(_, s) => Pin::new(s).poll_write(cx, buf),
+            Self::Xhttp(_, s) => Pin::new(s).poll_write(cx, buf),
         }
     }
 
@@ -623,6 +672,7 @@ impl AsyncWrite for TunnelStream {
             Self::Kcp(s) => Pin::new(s).poll_write_vectored(cx, bufs),
             #[cfg(feature = "grpc")]
             Self::Grpc(_, s) => Pin::new(s).poll_write_vectored(cx, bufs),
+            Self::Xhttp(_, s) => Pin::new(s).poll_write_vectored(cx, bufs),
         }
     }
 
@@ -634,6 +684,7 @@ impl AsyncWrite for TunnelStream {
             Self::Kcp(_) => false,
             #[cfg(feature = "grpc")]
             Self::Grpc(..) => false,
+            Self::Xhttp(..) => false,
         }
     }
 
@@ -645,6 +696,7 @@ impl AsyncWrite for TunnelStream {
             Self::Kcp(s) => Pin::new(s).poll_flush(cx),
             #[cfg(feature = "grpc")]
             Self::Grpc(_, s) => Pin::new(s).poll_flush(cx),
+            Self::Xhttp(_, s) => Pin::new(s).poll_flush(cx),
         }
     }
 
@@ -656,6 +708,7 @@ impl AsyncWrite for TunnelStream {
             Self::Kcp(s) => Pin::new(s).poll_shutdown(cx),
             #[cfg(feature = "grpc")]
             Self::Grpc(_, s) => Pin::new(s).poll_shutdown(cx),
+            Self::Xhttp(_, s) => Pin::new(s).poll_shutdown(cx),
         }
     }
 }
@@ -691,6 +744,10 @@ impl TunnelStream {
                 let (r, w) = s.into_split();
                 (TunnelReader::Grpc(g.clone(), r), TunnelWriter::Grpc(g, w))
             }
+            Self::Xhttp(g, s) => {
+                let (r, w) = s.into_split();
+                (TunnelReader::Xhttp(g.clone(), r), TunnelWriter::Xhttp(g, w))
+            }
         }
     }
 }
@@ -703,6 +760,7 @@ pub enum TunnelReader {
     Kcp(kcp::KcpReader),
     #[cfg(feature = "grpc")]
     Grpc(TcpGuard, grpc::GrpcReader),
+    Xhttp(TcpGuard, xhttp::XhttpReader),
 }
 
 /// Sending half of a [`TunnelStream`].
@@ -713,6 +771,7 @@ pub enum TunnelWriter {
     Kcp(kcp::KcpWriter),
     #[cfg(feature = "grpc")]
     Grpc(TcpGuard, grpc::GrpcWriter),
+    Xhttp(TcpGuard, xhttp::XhttpWriter),
 }
 
 impl AsyncRead for TunnelReader {
@@ -728,6 +787,7 @@ impl AsyncRead for TunnelReader {
             Self::Kcp(s) => Pin::new(s).poll_read(cx, buf),
             #[cfg(feature = "grpc")]
             Self::Grpc(_, s) => Pin::new(s).poll_read(cx, buf),
+            Self::Xhttp(_, s) => Pin::new(s).poll_read(cx, buf),
         }
     }
 }
@@ -745,6 +805,7 @@ impl AsyncWrite for TunnelWriter {
             Self::Kcp(s) => Pin::new(s).poll_write(cx, buf),
             #[cfg(feature = "grpc")]
             Self::Grpc(_, s) => Pin::new(s).poll_write(cx, buf),
+            Self::Xhttp(_, s) => Pin::new(s).poll_write(cx, buf),
         }
     }
 
@@ -760,6 +821,7 @@ impl AsyncWrite for TunnelWriter {
             Self::Kcp(s) => Pin::new(s).poll_write_vectored(cx, bufs),
             #[cfg(feature = "grpc")]
             Self::Grpc(_, s) => Pin::new(s).poll_write_vectored(cx, bufs),
+            Self::Xhttp(_, s) => Pin::new(s).poll_write_vectored(cx, bufs),
         }
     }
 
@@ -771,6 +833,7 @@ impl AsyncWrite for TunnelWriter {
             Self::Kcp(_) => false,
             #[cfg(feature = "grpc")]
             Self::Grpc(..) => false,
+            Self::Xhttp(..) => false,
         }
     }
 
@@ -782,6 +845,7 @@ impl AsyncWrite for TunnelWriter {
             Self::Kcp(s) => Pin::new(s).poll_flush(cx),
             #[cfg(feature = "grpc")]
             Self::Grpc(_, s) => Pin::new(s).poll_flush(cx),
+            Self::Xhttp(_, s) => Pin::new(s).poll_flush(cx),
         }
     }
 
@@ -793,6 +857,7 @@ impl AsyncWrite for TunnelWriter {
             Self::Kcp(s) => Pin::new(s).poll_shutdown(cx),
             #[cfg(feature = "grpc")]
             Self::Grpc(_, s) => Pin::new(s).poll_shutdown(cx),
+            Self::Xhttp(_, s) => Pin::new(s).poll_shutdown(cx),
         }
     }
 }

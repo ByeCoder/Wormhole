@@ -27,6 +27,7 @@ flowchart TD
 | `icmp` | the same encrypted KCP, in the payload of ICMP echo (ping) packets (IPv4, Linux, root) | UDP and TCP are blocked but ping still gets through |
 | `dns` | the same encrypted KCP, wrapped in DNS query/response messages over UDP 53 | only DNS passes; a direct server-to-server link |
 | `grpc` | the tunnel as a bidirectional gRPC call over HTTP/2 (cleartext h2c in this phase) | behind a CDN or reverse proxy that speaks gRPC |
+| `xhttp` | the tunnel streamed over an HTTP/1.1 request/response with chunked bodies | only HTTP passes, or behind an HTTP CDN/proxy |
 
 Everything except `quic` runs the same layers on top: the handshake (mutual
 authentication with the token, X25519 for forward secrecy), AEAD records, and mux.
@@ -258,6 +259,32 @@ listen = "0.0.0.0:2096"       # acceptor: the HTTP/2 port the CDN/proxy forwards
 In the panel: pick *gRPC* as the transport in the tunnel wizard and editor. Needs 1.2.0 on
 both servers.
 
+## `xhttp`
+
+`transport = "xhttp"` streams the tunnel over one **ordinary HTTP/1.1 request and
+response**, like XHTTP in Xray. The dialing side sends a `POST` whose chunked body is the
+upstream; the listening side answers `200` whose chunked body is the downstream; both
+bodies stay open for the life of the connection.
+
+```toml
+[tunnel]
+transport = "xhttp"
+listen = "0.0.0.0:8080"       # acceptor: the HTTP port the CDN/proxy forwards to
+# remote = "203.0.113.9:8080" # dialer: the peer's HTTP endpoint
+```
+
+- **Cleartext HTTP/1.1 in this phase.** Put it behind a CDN or reverse proxy that
+  terminates TLS and forwards HTTP, or use it where plain HTTP already passes. (Native TLS,
+  like `wss`, is a planned follow-up.)
+- **A stream transport**, like `tcp` and `ws`: the handshake, encryption and `[tunnel.mux]`
+  run on top, and the bytes travel in HTTP chunks. No new dependency — the HTTP is written
+  and parsed directly.
+- **No root, IPv4 or IPv6.** Needs a path that keeps a single HTTP response streaming
+  (full-duplex); a proxy that buffers whole responses will stall it.
+
+In the panel: pick *XHTTP* as the transport in the tunnel wizard and editor. Needs 1.2.0 on
+both servers.
+
 ## `wss` with a real certificate
 
 By default a listening `wss` side serves a self-signed certificate that the dialing side pins.
@@ -357,7 +384,7 @@ most providers' terms of service.
 ## Modes and transports
 
 Every transport works in both modes. The listening side needs its port reachable:
-TCP for `tcp`, `tcpmux`, `ws`, `wss`, `paqet` and `grpc`, UDP for `quic`, `kcp` and `dns`,
+TCP for `tcp`, `tcpmux`, `ws`, `wss`, `paqet`, `grpc` and `xhttp`, UDP for `quic`, `kcp` and `dns`,
 and ICMP echo for `icmp` (no port at all). For `paqet` and `icmp`, Wormhole opens its own
 host firewall; a firewall in front of the server still has to let the TCP port (or ICMP)
 through.

@@ -1,10 +1,10 @@
 import type { MuxSpec } from "./api";
 
 /** The transports a person chooses from. `tcp` with mux on is the core's `tcpmux`; with mux off, plain `tcp`. */
-export const TRANSPORTS = ["auto", "tcp", "ws", "wss", "quic", "kcp", "paqet", "spoof", "icmp", "dns", "grpc"] as const;
+export const TRANSPORTS = ["auto", "tcp", "ws", "wss", "quic", "kcp", "paqet", "spoof", "icmp", "dns", "grpc", "xhttp"] as const;
 
 /** Transports where mux can be turned off (`auto` and `quic` always multiplex). */
-export const MUX_OPTIONAL = ["tcp", "ws", "wss", "kcp", "paqet", "icmp", "dns", "grpc"];
+export const MUX_OPTIONAL = ["tcp", "ws", "wss", "kcp", "paqet", "icmp", "dns", "grpc", "xhttp"];
 
 /** Transports that ride a raw IPv4 TCP carrier (IPv4 only, listen on 0.0.0.0, no GRE). */
 export const RAW_TCP = ["paqet", "spoof"];

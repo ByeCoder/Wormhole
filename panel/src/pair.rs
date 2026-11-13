@@ -235,6 +235,11 @@ impl PairRequest {
         self.transport == "grpc"
     }
 
+    /// Whether this is an `xhttp` tunnel (the tunnel over streaming HTTP/1.1).
+    fn needs_xhttp(&self) -> bool {
+        self.transport == "xhttp"
+    }
+
     /// A Paqet tunnel listens on every IPv4 address (`0.0.0.0`), as the other transports
     /// do. Its listening agent knows that from [`PAQET_ANY_SINCE`]; an older one gets
     /// its own IPv4 address instead (the one its route to the internet leaves from, as
@@ -346,6 +351,7 @@ impl PairRequest {
             || self.needs_icmp()
             || self.needs_dns()
             || self.needs_grpc()
+            || self.needs_xhttp()
             || self.chosen_encryption().is_some()
             || self.sealed()
             || self.needs_2_4().0
@@ -440,6 +446,10 @@ impl PairRequest {
         // The grpc transport came with 1.2.0; both sides take part.
         if self.needs_grpc() && !release_at_least(version, GRPC_SINCE) {
             bail!("old_agent_grpc:{id}:{version}");
+        }
+        // The xhttp transport came with 1.2.0; both sides take part.
+        if self.needs_xhttp() && !release_at_least(version, XHTTP_SINCE) {
+            bail!("old_agent_xhttp:{id}:{version}");
         }
         Ok(())
     }
@@ -602,6 +612,9 @@ pub const DNS_SINCE: &str = "1.2.0";
 
 /// The first release with the `grpc` transport (a tunnel stream over gRPC/HTTP-2).
 pub const GRPC_SINCE: &str = "1.2.0";
+
+/// The first release with the `xhttp` transport (the tunnel over streaming HTTP/1.1).
+pub const XHTTP_SINCE: &str = "1.2.0";
 
 /// A `paqet` tunnel's `[tunnel.kcp]` table, and only its: an empty table is the same as
 /// none, and another transport never gets the table (the core refuses it there).
