@@ -22,6 +22,14 @@ layers above them are unchanged. Both servers need 1.2.0.
   so throughput is lower — DNS is a last resort. In the panel: pick *DNS* as the transport.
   Sample configs: `configs/entry-dns.toml`, `configs/exit-dns.toml`. Guide:
   [Transports](docs/transports.md#dns).
+- **`grpc`** — the tunnel carried as one bidirectional gRPC call over HTTP/2 (the `h2`
+  crate, behind the default-on `grpc` cargo feature), to pass through CDNs and reverse
+  proxies that speak gRPC. A stream transport like `tcp`/`ws`: the handshake, encryption and
+  mux run on top, and the bytes travel in gRPC length-prefixed messages. This phase is
+  cleartext HTTP/2 (h2c), so run it behind a TLS-terminating CDN or proxy; native TLS with
+  ALPN `h2` is a planned follow-up. No root; IPv4 or IPv6. In the panel: pick *gRPC* as the
+  transport. Sample configs: `configs/entry-grpc.toml`, `configs/exit-grpc.toml`. Guide:
+  [Transports](docs/transports.md#grpc).
 
 ## 1.1.0 - 2026-11-13
 

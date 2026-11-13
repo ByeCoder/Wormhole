@@ -2332,6 +2332,8 @@ dependencies = [
  "bytes",
  "clap",
  "getrandom 0.4.3",
+ "h2",
+ "http",
  "httparse",
  "kcp",
  "libc",

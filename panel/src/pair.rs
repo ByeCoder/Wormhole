@@ -230,6 +230,11 @@ impl PairRequest {
         self.transport == "dns"
     }
 
+    /// Whether this is a `grpc` tunnel (a tunnel stream over gRPC/HTTP-2).
+    fn needs_grpc(&self) -> bool {
+        self.transport == "grpc"
+    }
+
     /// A Paqet tunnel listens on every IPv4 address (`0.0.0.0`), as the other transports
     /// do. Its listening agent knows that from [`PAQET_ANY_SINCE`]; an older one gets
     /// its own IPv4 address instead (the one its route to the internet leaves from, as
@@ -340,6 +345,7 @@ impl PairRequest {
             || self.needs_paqet()
             || self.needs_icmp()
             || self.needs_dns()
+            || self.needs_grpc()
             || self.chosen_encryption().is_some()
             || self.sealed()
             || self.needs_2_4().0
@@ -430,6 +436,10 @@ impl PairRequest {
         // The dns transport came with 1.2.0; both sides take part.
         if self.needs_dns() && !release_at_least(version, DNS_SINCE) {
             bail!("old_agent_dns:{id}:{version}");
+        }
+        // The grpc transport came with 1.2.0; both sides take part.
+        if self.needs_grpc() && !release_at_least(version, GRPC_SINCE) {
+            bail!("old_agent_grpc:{id}:{version}");
         }
         Ok(())
     }
@@ -589,6 +599,9 @@ pub const ICMP_SINCE: &str = "1.2.0";
 
 /// The first release with the `dns` transport (KCP in DNS query/response over UDP).
 pub const DNS_SINCE: &str = "1.2.0";
+
+/// The first release with the `grpc` transport (a tunnel stream over gRPC/HTTP-2).
+pub const GRPC_SINCE: &str = "1.2.0";
 
 /// A `paqet` tunnel's `[tunnel.kcp]` table, and only its: an empty table is the same as
 /// none, and another transport never gets the table (the core refuses it there).

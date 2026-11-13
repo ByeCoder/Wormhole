@@ -92,6 +92,9 @@ pub enum TransportKind {
     /// listening side), encrypted with a `dns`-specific key from the token. For paths that
     /// pass only DNS. Works over IPv4 and IPv6.
     Dns,
+    /// A tunnel stream carried as a bidirectional gRPC call over HTTP/2, to pass through
+    /// CDNs and reverse proxies that speak gRPC. A stream transport, like `tcp` and `ws`.
+    Grpc,
 }
 
 impl TransportKind {
@@ -108,6 +111,7 @@ impl TransportKind {
             Self::Spoof => "spoof",
             Self::Icmp => "icmp",
             Self::Dns => "dns",
+            Self::Grpc => "grpc",
         }
     }
 
@@ -1192,6 +1196,12 @@ impl Config {
         if self.tunnel.transport == TransportKind::Dns && !cfg!(feature = "kcp") {
             bail!(
                 "transport = \"dns\" is not in this build (built without the `kcp` cargo \
+                 feature)"
+            );
+        }
+        if self.tunnel.transport == TransportKind::Grpc && !cfg!(feature = "grpc") {
+            bail!(
+                "transport = \"grpc\" is not in this build (built without the `grpc` cargo \
                  feature)"
             );
         }

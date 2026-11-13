@@ -26,6 +26,7 @@ flowchart TD
 | [`paqet`](paqet.md) | the same encrypted KCP, in raw TCP segments with no handshake (IPv4, Linux) | UDP is blocked or throttled but TCP gets through |
 | `icmp` | the same encrypted KCP, in the payload of ICMP echo (ping) packets (IPv4, Linux, root) | UDP and TCP are blocked but ping still gets through |
 | `dns` | the same encrypted KCP, wrapped in DNS query/response messages over UDP 53 | only DNS passes; a direct server-to-server link |
+| `grpc` | the tunnel as a bidirectional gRPC call over HTTP/2 (cleartext h2c in this phase) | behind a CDN or reverse proxy that speaks gRPC |
 
 Everything except `quic` runs the same layers on top: the handshake (mutual
 authentication with the token, X25519 for forward secrecy), AEAD records, and mux.
@@ -231,6 +232,32 @@ listen = "0.0.0.0:53"         # acceptor: UDP 53, where a DNS filter expects tra
 In the panel: pick *DNS* as the transport in the tunnel wizard and editor. Needs 1.2.0 on
 both servers.
 
+## `grpc`
+
+`transport = "grpc"` carries the tunnel as one **bidirectional gRPC call over HTTP/2**. The
+dialing side opens a `POST` to a gRPC-looking path with `content-type: application/grpc`,
+the listening side answers `200`, and the tunnel's bytes travel in gRPC length-prefixed
+messages. It is for getting through a CDN or reverse proxy that speaks gRPC/HTTP-2.
+
+```toml
+[tunnel]
+transport = "grpc"
+listen = "0.0.0.0:2096"       # acceptor: the HTTP/2 port the CDN/proxy forwards gRPC to
+# remote = "203.0.113.9:2096" # dialer: the peer's gRPC endpoint
+```
+
+- **Cleartext HTTP/2 in this phase.** The tunnel speaks h2c (HTTP/2 without TLS). To use a
+  CDN, put it **behind a CDN or reverse proxy that terminates TLS** and forwards gRPC to
+  this port — the usual way gRPC runs behind Cloudflare, nginx or Caddy. (Native TLS with
+  ALPN `h2`, so no front is needed, is a planned follow-up.)
+- **A stream transport**, like `tcp` and `ws`: the handshake, encryption and `[tunnel.mux]`
+  run on top. HTTP/2 is provided by the `h2` crate, behind the `grpc` cargo feature (on by
+  default).
+- **No root, IPv4 or IPv6.**
+
+In the panel: pick *gRPC* as the transport in the tunnel wizard and editor. Needs 1.2.0 on
+both servers.
+
 ## `wss` with a real certificate
 
 By default a listening `wss` side serves a self-signed certificate that the dialing side pins.
@@ -330,6 +357,7 @@ most providers' terms of service.
 ## Modes and transports
 
 Every transport works in both modes. The listening side needs its port reachable:
-TCP for `tcp`, `tcpmux`, `ws`, `wss` and `paqet`, UDP for `quic`, `kcp` and `dns`, and ICMP
-echo for `icmp` (no port at all). For `paqet` and `icmp`, Wormhole opens its own host
-firewall; a firewall in front of the server still has to let the TCP port (or ICMP) through.
+TCP for `tcp`, `tcpmux`, `ws`, `wss`, `paqet` and `grpc`, UDP for `quic`, `kcp` and `dns`,
+and ICMP echo for `icmp` (no port at all). For `paqet` and `icmp`, Wormhole opens its own
+host firewall; a firewall in front of the server still has to let the TCP port (or ICMP)
+through.

@@ -362,6 +362,16 @@ impl Setup {
         }
     }
 
+    /// grpc: a tunnel stream over a bidirectional gRPC call on cleartext HTTP/2. A stream
+    /// transport like tcp/ws (TCP underneath), so the default keepalive is fine.
+    const fn grpc(mode: &'static str) -> Self {
+        Self {
+            transport: "grpc",
+            mux: true,
+            ..Self::tcp(mode)
+        }
+    }
+
     const fn no_mux(self) -> Self {
         Self { mux: false, ..self }
     }
@@ -959,6 +969,9 @@ tunnel_tests! {
     dns_reverse: Setup::dns("reverse");
     dns_direct: Setup::dns("direct");
     dns_reverse_no_mux: Setup::dns("reverse").no_mux();
+    grpc_reverse: Setup::grpc("reverse");
+    grpc_direct: Setup::grpc("direct");
+    grpc_reverse_no_mux: Setup::grpc("reverse").no_mux();
     auto_reverse: Setup::tcp("reverse").transport("auto").mux();
     auto_direct: Setup::tcp("direct").transport("auto").mux();
 }

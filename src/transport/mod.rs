@@ -9,6 +9,8 @@
 //! (and for `tls`, the HTTP upgrade) left out.
 
 pub mod dns;
+#[cfg(feature = "grpc")]
+pub mod grpc;
 pub mod icmp;
 #[cfg(feature = "kcp")]
 pub mod kcp;
@@ -84,6 +86,8 @@ pub enum Listener {
         Option<TlsAcceptor>,
     ),
     Kcp(kcp::KcpListener),
+    #[cfg(feature = "grpc")]
+    Grpc(tcp::TcpTransportListener),
 }
 
 impl Listener {
@@ -117,6 +121,15 @@ impl Listener {
             }
             _ => {}
         }
+        #[cfg(feature = "grpc")]
+        if settings.kind == TransportKind::Grpc {
+            let tcp = tcp::TcpTransportListener::bind(addr, tuning).await?;
+            return Ok(Self::Grpc(tcp));
+        }
+        #[cfg(not(feature = "grpc"))]
+        if settings.kind == TransportKind::Grpc {
+            return Err(grpc_not_built());
+        }
         let tcp = tcp::TcpTransportListener::bind(addr, tuning).await?;
         match settings.kind {
             TransportKind::Quic
@@ -125,6 +138,7 @@ impl Listener {
             | TransportKind::Spoof
             | TransportKind::Icmp
             | TransportKind::Dns
+            | TransportKind::Grpc
             | TransportKind::Auto => unreachable!("handled above"),
             TransportKind::Tcp | TransportKind::Tcpmux => Ok(Self::Tcp(tcp)),
             TransportKind::Ws | TransportKind::Wss => Ok(Self::Ws(
@@ -159,6 +173,11 @@ impl Listener {
                 let (s, peer) = l.accept().await?;
                 Ok((Incoming::Kcp(s), peer))
             }
+            #[cfg(feature = "grpc")]
+            Self::Grpc(l) => {
+                let (s, peer) = l.accept().await?;
+                Ok((Incoming::Grpc(link_guard(&s), s, peer), peer))
+            }
         }
     }
 
@@ -166,6 +185,8 @@ impl Listener {
         match self {
             Self::Tcp(l) | Self::Ws(l, ..) => l.local_addr(),
             Self::Kcp(l) => l.local_addr(),
+            #[cfg(feature = "grpc")]
+            Self::Grpc(l) => l.local_addr(),
         }
     }
 }
@@ -182,6 +203,8 @@ pub enum Incoming {
         peer: SocketAddr,
     },
     Kcp(kcp::KcpStream),
+    #[cfg(feature = "grpc")]
+    Grpc(TcpGuard, TcpStream, SocketAddr),
 }
 
 impl Incoming {
@@ -194,6 +217,14 @@ impl Incoming {
         match self {
             Self::Tcp(g, s) => Ok(TunnelStream::Tcp(g, s)),
             Self::Kcp(s) => Ok(TunnelStream::Kcp(s)),
+            #[cfg(feature = "grpc")]
+            Self::Grpc(guard, stream, _peer) => {
+                let (reader, writer) = grpc::accept(stream).await?;
+                Ok(TunnelStream::Grpc(
+                    guard,
+                    grpc::GrpcStream::new(reader, writer),
+                ))
+            }
             Self::Ws {
                 guard,
                 mut stream,
@@ -237,6 +268,8 @@ pub enum Dialer {
     Tcp(tcp::TcpTransportDialer),
     Ws(tcp::TcpTransportDialer, Box<WsDialer>),
     Kcp(kcp::KcpDialer),
+    #[cfg(feature = "grpc")]
+    Grpc(tcp::TcpTransportDialer, String),
 }
 
 /// WebSocket part of a [`Dialer`].
@@ -261,6 +294,14 @@ impl Dialer {
             return Ok(Self::Kcp(kcp::KcpDialer::new(addr, &settings.kcp, tuning)));
         }
         let tcp = tcp::TcpTransportDialer::new(addr, tuning);
+        #[cfg(feature = "grpc")]
+        if settings.kind == TransportKind::Grpc {
+            return Ok(Self::Grpc(tcp, addr.to_string()));
+        }
+        #[cfg(not(feature = "grpc"))]
+        if settings.kind == TransportKind::Grpc {
+            return Err(grpc_not_built());
+        }
         let ws = settings.ws.as_ref();
         let (config, tls) = match settings.kind {
             TransportKind::Tcp | TransportKind::Tcpmux => return Ok(Self::Tcp(tcp)),
@@ -269,7 +310,8 @@ impl Dialer {
             | TransportKind::Paqet
             | TransportKind::Spoof
             | TransportKind::Icmp
-            | TransportKind::Dns => {
+            | TransportKind::Dns
+            | TransportKind::Grpc => {
                 unreachable!("handled above")
             }
             TransportKind::Ws => (ws::ClientConfig::new(ws, addr, "http", 80), None),
@@ -313,6 +355,20 @@ impl Dialer {
                     stream.write_all(first).await?;
                 }
                 Ok(TunnelStream::Kcp(stream))
+            }
+            #[cfg(feature = "grpc")]
+            Self::Grpc(d, authority) => {
+                let stream = d.dial().await?;
+                let guard = link_guard(&stream);
+                let (reader, mut writer) = grpc::connect(stream, authority).await?;
+                if !first.is_empty() {
+                    writer.write_all(first).await?;
+                    writer.flush().await?;
+                }
+                Ok(TunnelStream::Grpc(
+                    guard,
+                    grpc::GrpcStream::new(reader, writer),
+                ))
             }
             Self::Ws(d, ws) => {
                 let stream = d.dial().await?;
@@ -411,6 +467,15 @@ fn set_tclass(_: &socket2::SockRef<'_>, _: u32) -> io::Result<()> {
 /// Counts a tunnel connection on the wire ([`wire`]) while it lives. The guard sits in
 /// front of the socket in every variant below, so it is dropped (and reads the socket a
 /// last time) before the socket closes.
+/// The error when `transport = "grpc"` is selected in a build without the `grpc` feature.
+#[cfg(not(feature = "grpc"))]
+fn grpc_not_built() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::Unsupported,
+        "transport = \"grpc\" is not in this build (built without the `grpc` cargo feature)",
+    )
+}
+
 fn link_guard(stream: &TcpStream) -> TcpGuard {
     wire::meter().track(stream, Leg::Link)
 }
@@ -434,6 +499,8 @@ pub enum TunnelStream {
         Box<ws::WsStream<ReadHalf<TlsTcp>, WriteHalf<TlsTcp>>>,
     ),
     Kcp(kcp::KcpStream),
+    #[cfg(feature = "grpc")]
+    Grpc(TcpGuard, grpc::GrpcStream),
 }
 
 impl TunnelStream {
@@ -442,6 +509,8 @@ impl TunnelStream {
         match self {
             Self::Kcp(s) => s.datagrams(),
             Self::Tcp(..) | Self::Ws(..) | Self::Wss(..) => None,
+            #[cfg(feature = "grpc")]
+            Self::Grpc(..) => None,
         }
     }
 
@@ -450,6 +519,8 @@ impl TunnelStream {
     async fn answer_upgrade(&mut self) -> io::Result<()> {
         let early = match self {
             Self::Tcp(..) | Self::Kcp(_) => return Ok(()),
+            #[cfg(feature = "grpc")]
+            Self::Grpc(..) => return Ok(()),
             Self::Ws(_, s) => s.reader().has_early(),
             Self::Wss(_, s) => s.reader().has_early(),
         };
@@ -465,6 +536,8 @@ impl TunnelStream {
     pub fn reject_upgrade(&mut self) -> bool {
         match self {
             Self::Tcp(..) | Self::Kcp(_) => false,
+            #[cfg(feature = "grpc")]
+            Self::Grpc(..) => false,
             Self::Ws(_, s) => s.reject_upgrade(),
             Self::Wss(_, s) => s.reject_upgrade(),
         }
@@ -480,6 +553,8 @@ impl TunnelStream {
         match self {
             Self::Tcp(_, s) => would_block(s.try_read(&mut probe)),
             Self::Kcp(s) => s.is_alive(),
+            #[cfg(feature = "grpc")]
+            Self::Grpc(_, s) => s.is_alive(),
             // Anything from the peer (even a ping) means the connection is not idle.
             Self::Ws(_, s) => {
                 !s.reader().has_buffered() && would_block(s.reader().get_ref().try_read(&mut probe))
@@ -514,6 +589,8 @@ impl AsyncRead for TunnelStream {
             Self::Ws(_, s) => Pin::new(s).poll_read(cx, buf),
             Self::Wss(_, s) => Pin::new(&mut **s).poll_read(cx, buf),
             Self::Kcp(s) => Pin::new(s).poll_read(cx, buf),
+            #[cfg(feature = "grpc")]
+            Self::Grpc(_, s) => Pin::new(s).poll_read(cx, buf),
         }
     }
 }
@@ -529,6 +606,8 @@ impl AsyncWrite for TunnelStream {
             Self::Ws(_, s) => Pin::new(s).poll_write(cx, buf),
             Self::Wss(_, s) => Pin::new(&mut **s).poll_write(cx, buf),
             Self::Kcp(s) => Pin::new(s).poll_write(cx, buf),
+            #[cfg(feature = "grpc")]
+            Self::Grpc(_, s) => Pin::new(s).poll_write(cx, buf),
         }
     }
 
@@ -542,6 +621,8 @@ impl AsyncWrite for TunnelStream {
             Self::Ws(_, s) => Pin::new(s).poll_write_vectored(cx, bufs),
             Self::Wss(_, s) => Pin::new(&mut **s).poll_write_vectored(cx, bufs),
             Self::Kcp(s) => Pin::new(s).poll_write_vectored(cx, bufs),
+            #[cfg(feature = "grpc")]
+            Self::Grpc(_, s) => Pin::new(s).poll_write_vectored(cx, bufs),
         }
     }
 
@@ -551,6 +632,8 @@ impl AsyncWrite for TunnelStream {
             Self::Ws(_, s) => s.is_write_vectored(),
             Self::Wss(_, s) => s.is_write_vectored(),
             Self::Kcp(_) => false,
+            #[cfg(feature = "grpc")]
+            Self::Grpc(..) => false,
         }
     }
 
@@ -560,6 +643,8 @@ impl AsyncWrite for TunnelStream {
             Self::Ws(_, s) => Pin::new(s).poll_flush(cx),
             Self::Wss(_, s) => Pin::new(&mut **s).poll_flush(cx),
             Self::Kcp(s) => Pin::new(s).poll_flush(cx),
+            #[cfg(feature = "grpc")]
+            Self::Grpc(_, s) => Pin::new(s).poll_flush(cx),
         }
     }
 
@@ -569,6 +654,8 @@ impl AsyncWrite for TunnelStream {
             Self::Ws(_, s) => Pin::new(s).poll_shutdown(cx),
             Self::Wss(_, s) => Pin::new(&mut **s).poll_shutdown(cx),
             Self::Kcp(s) => Pin::new(s).poll_shutdown(cx),
+            #[cfg(feature = "grpc")]
+            Self::Grpc(_, s) => Pin::new(s).poll_shutdown(cx),
         }
     }
 }
@@ -599,6 +686,11 @@ impl TunnelStream {
                 let (r, w) = s.into_split();
                 (TunnelReader::Kcp(r), TunnelWriter::Kcp(w))
             }
+            #[cfg(feature = "grpc")]
+            Self::Grpc(g, s) => {
+                let (r, w) = s.into_split();
+                (TunnelReader::Grpc(g.clone(), r), TunnelWriter::Grpc(g, w))
+            }
         }
     }
 }
@@ -609,6 +701,8 @@ pub enum TunnelReader {
     Ws(TcpGuard, ws::WsReader<OwnedReadHalf>),
     Wss(TcpGuard, Box<ws::WsReader<ReadHalf<TlsTcp>>>),
     Kcp(kcp::KcpReader),
+    #[cfg(feature = "grpc")]
+    Grpc(TcpGuard, grpc::GrpcReader),
 }
 
 /// Sending half of a [`TunnelStream`].
@@ -617,6 +711,8 @@ pub enum TunnelWriter {
     Ws(TcpGuard, ws::WsWriter<OwnedWriteHalf>),
     Wss(TcpGuard, Box<ws::WsWriter<WriteHalf<TlsTcp>>>),
     Kcp(kcp::KcpWriter),
+    #[cfg(feature = "grpc")]
+    Grpc(TcpGuard, grpc::GrpcWriter),
 }
 
 impl AsyncRead for TunnelReader {
@@ -630,6 +726,8 @@ impl AsyncRead for TunnelReader {
             Self::Ws(_, s) => Pin::new(s).poll_read(cx, buf),
             Self::Wss(_, s) => Pin::new(&mut **s).poll_read(cx, buf),
             Self::Kcp(s) => Pin::new(s).poll_read(cx, buf),
+            #[cfg(feature = "grpc")]
+            Self::Grpc(_, s) => Pin::new(s).poll_read(cx, buf),
         }
     }
 }
@@ -645,6 +743,8 @@ impl AsyncWrite for TunnelWriter {
             Self::Ws(_, s) => Pin::new(s).poll_write(cx, buf),
             Self::Wss(_, s) => Pin::new(&mut **s).poll_write(cx, buf),
             Self::Kcp(s) => Pin::new(s).poll_write(cx, buf),
+            #[cfg(feature = "grpc")]
+            Self::Grpc(_, s) => Pin::new(s).poll_write(cx, buf),
         }
     }
 
@@ -658,6 +758,8 @@ impl AsyncWrite for TunnelWriter {
             Self::Ws(_, s) => Pin::new(s).poll_write_vectored(cx, bufs),
             Self::Wss(_, s) => Pin::new(&mut **s).poll_write_vectored(cx, bufs),
             Self::Kcp(s) => Pin::new(s).poll_write_vectored(cx, bufs),
+            #[cfg(feature = "grpc")]
+            Self::Grpc(_, s) => Pin::new(s).poll_write_vectored(cx, bufs),
         }
     }
 
@@ -667,6 +769,8 @@ impl AsyncWrite for TunnelWriter {
             Self::Ws(_, s) => s.is_write_vectored(),
             Self::Wss(_, s) => s.is_write_vectored(),
             Self::Kcp(_) => false,
+            #[cfg(feature = "grpc")]
+            Self::Grpc(..) => false,
         }
     }
 
@@ -676,6 +780,8 @@ impl AsyncWrite for TunnelWriter {
             Self::Ws(_, s) => Pin::new(s).poll_flush(cx),
             Self::Wss(_, s) => Pin::new(&mut **s).poll_flush(cx),
             Self::Kcp(s) => Pin::new(s).poll_flush(cx),
+            #[cfg(feature = "grpc")]
+            Self::Grpc(_, s) => Pin::new(s).poll_flush(cx),
         }
     }
 
@@ -685,6 +791,8 @@ impl AsyncWrite for TunnelWriter {
             Self::Ws(_, s) => Pin::new(s).poll_shutdown(cx),
             Self::Wss(_, s) => Pin::new(&mut **s).poll_shutdown(cx),
             Self::Kcp(s) => Pin::new(s).poll_shutdown(cx),
+            #[cfg(feature = "grpc")]
+            Self::Grpc(_, s) => Pin::new(s).poll_shutdown(cx),
         }
     }
 }
