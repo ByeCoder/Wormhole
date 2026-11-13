@@ -102,9 +102,9 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
   // only and never over a private network: every IPv4 address.
   const [netId, setNetId] = useState("");
   const [spoof, setSpoof] = useState(emptySpoof());
-  // Spoof rides the same raw IPv4 carrier as paqet: IPv4 only, listen on every address,
-  // never over a private network.
-  const paqet = transport === "paqet" || transport === "spoof";
+  // Spoof and icmp ride a raw IPv4 carrier like paqet: IPv4 only, listen on every
+  // address, never over a private network.
+  const paqet = transport === "paqet" || transport === "spoof" || transport === "icmp";
   const spoofOn = transport === "spoof";
   const listenHost = !paqet && isV6(dialHost) ? "[::]" : "0.0.0.0";
   const { networks, links } = useNetworks();
@@ -490,7 +490,7 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
               <>
                 <h3 className="wz-q">{t("wz.q3")}</h3>
                 <p className="wz-lead">{t("wz.lead3", { acceptor: serverName(acceptor), dialer: serverName(dialer) })}</p>
-                <GreChoice value={netId} onChange={setNetId} networks={networks} links={links} entry={entry} exit={exit} acceptor={acceptor} port={listenPort} serverName={serverName} blocked={paqet ? t("paqet.noNetwork") : undefined} />
+                <GreChoice value={netId} onChange={setNetId} networks={networks} links={links} entry={entry} exit={exit} acceptor={acceptor} port={listenPort} serverName={serverName} blocked={paqet ? (transport === "icmp" ? t("icmp.noNetwork") : t("paqet.noNetwork")) : undefined} />
                 <div className="grid-2 wz-grid">
                   <div className="field">
                     <label htmlFor="wz-port">{t("wz.port", { server: serverName(acceptor) })}</label>
@@ -525,7 +525,7 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
                       }}
                     />
                     <span className="help">{t("wz.dialHelp")}</span>
-                    {paqet && <span className="help">{t("paqet.ipv4Only")}</span>}
+                    {paqet && <span className="help">{transport === "icmp" ? t("icmp.ipv4Only") : t("paqet.ipv4Only")}</span>}
                     {(paqet ? ipv4Choices : addrChoices).length > 0 && (
                       <span className="addr-chips" aria-label={t("wz.dialSeen", { server: serverName(acceptor) })}>
                         {(paqet ? ipv4Choices : addrChoices).map((a) => (

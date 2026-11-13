@@ -24,6 +24,7 @@ flowchart TD
 | `quic` | QUIC over UDP: streams and datagrams, TLS 1.3 | UDP flows without head-of-line blocking; paths where UDP works well |
 | `kcp` | KCP over UDP, every packet encrypted, optional FEC | lossy links where TCP collapses; games |
 | [`paqet`](paqet.md) | the same encrypted KCP, in raw TCP segments with no handshake (IPv4, Linux) | UDP is blocked or throttled but TCP gets through |
+| `icmp` | the same encrypted KCP, in the payload of ICMP echo (ping) packets (IPv4, Linux, root) | UDP and TCP are blocked but ping still gets through |
 
 Everything except `quic` runs the same layers on top: the handshake (mutual
 authentication with the token, X25519 for forward secrecy), AEAD records, and mux.
@@ -165,6 +166,40 @@ UDP but let TCP through.
 
 The whole guide, with examples and troubleshooting: [Paqet over raw TCP](paqet.md).
 
+## `icmp`
+
+`transport = "icmp"` carries the packets of `kcp` (sealed with the token, same presets, FEC
+and windows) inside the payload of **ICMP echo requests** — ordinary `ping` packets — over a
+raw socket. It is for the hardest routes, where both UDP and TCP are blocked or throttled but
+ICMP (ping) still passes.
+
+```toml
+[tunnel]
+transport = "icmp"
+listen = "0.0.0.0:4000"       # acceptor: the port is the ICMP echo identifier, not a TCP/UDP port
+# remote = "203.0.113.9:4000" # dialer: the peer's real address and its identifier
+```
+
+- **Nothing to set up.** The tunnel service opens the raw socket and adds scoped host
+  firewall rules of its own, and removes them when it stops. Both ends send echo *requests*,
+  so the only echo *replies* on the wire are the kernel's own answers; one firewall rule
+  drops those for the peer, which keeps the traffic from doubling without touching the
+  tunnel.
+- **The port is an ICMP identifier, not a real port.** ICMP has no ports, so Wormhole uses
+  the echo identifier (from `listen` / `remote`) to tell several tunnels — and the host's own
+  `ping` — apart. It reserves no TCP or UDP port.
+- **IPv4 only, needs root** (or `CAP_NET_RAW`), **and not over GRE or VXLAN**: inside a
+  private network a filter sees only the outer packets, so the disguise gains nothing. The
+  panel offers neither for `icmp`.
+- **The same settings as `kcp`:** the profile, `[tunnel.mux]` and `[tuning]`. (`[tunnel.kcp]`
+  custom tuning is a Paqet-only field in the panel; `icmp` uses the profile's KCP presets.)
+- **It needs a path that passes ICMP echo.** Where ping is dropped or rate-limited, use
+  `paqet` or `wss`.
+
+Both ends send echo requests (never replies), so there is no ping/pong pairing; the echo
+sequence and identifier fields carry the two ends' identifiers so replies find their way,
+and the two ends differ even on loopback. Needs 1.2.0 on both servers.
+
 ## `wss` with a real certificate
 
 By default a listening `wss` side serves a self-signed certificate that the dialing side pins.
@@ -264,5 +299,6 @@ most providers' terms of service.
 ## Modes and transports
 
 Every transport works in both modes. The listening side needs its port reachable:
-TCP for `tcp`, `tcpmux`, `ws`, `wss` and `paqet`, UDP for `quic` and `kcp`. For `paqet`, Wormhole
-opens its own host firewall; a firewall in front of the server still has to let the TCP port through.
+TCP for `tcp`, `tcpmux`, `ws`, `wss` and `paqet`, UDP for `quic` and `kcp`, and ICMP echo for
+`icmp` (no port at all). For `paqet` and `icmp`, Wormhole opens its own host firewall; a
+firewall in front of the server still has to let the TCP port (or ICMP) through.

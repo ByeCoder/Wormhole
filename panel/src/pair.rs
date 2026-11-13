@@ -220,6 +220,11 @@ impl PairRequest {
         self.transport == "paqet"
     }
 
+    /// Whether this is an `icmp` tunnel (KCP in ICMP echo over a raw socket).
+    fn needs_icmp(&self) -> bool {
+        self.transport == "icmp"
+    }
+
     /// A Paqet tunnel listens on every IPv4 address (`0.0.0.0`), as the other transports
     /// do. Its listening agent knows that from [`PAQET_ANY_SINCE`]; an older one gets
     /// its own IPv4 address instead (the one its route to the internet leaves from, as
@@ -328,6 +333,7 @@ impl PairRequest {
     fn require_new_enough(&self, hub: &Hub) -> Result<()> {
         let anything_new = self.needs_new_servers()
             || self.needs_paqet()
+            || self.needs_icmp()
             || self.chosen_encryption().is_some()
             || self.sealed()
             || self.needs_2_4().0
@@ -410,6 +416,10 @@ impl PairRequest {
         // speak the same one: an older agent refuses the field.
         if self.ws_mode_field().is_some() && !release_at_least(version, WS_MODE_SINCE) {
             bail!("old_agent_wsmode:{id}:{version}");
+        }
+        // The icmp transport came with 1.2.0; both sides take part.
+        if self.needs_icmp() && !release_at_least(version, ICMP_SINCE) {
+            bail!("old_agent_icmp:{id}:{version}");
         }
         Ok(())
     }
@@ -563,6 +573,9 @@ const OWN_CERT_SINCE: &str = "1.0.0";
 
 /// The first release with `tunnel.ws.mode` (`httpupgrade`, and `tls` for wss).
 pub const WS_MODE_SINCE: &str = "1.1.0";
+
+/// The first release with the `icmp` transport (KCP in ICMP echo over a raw socket).
+pub const ICMP_SINCE: &str = "1.2.0";
 
 /// A `paqet` tunnel's `[tunnel.kcp]` table, and only its: an empty table is the same as
 /// none, and another transport never gets the table (the core refuses it there).

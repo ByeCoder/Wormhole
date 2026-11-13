@@ -12,6 +12,8 @@ use tracing::debug;
 use crate::transport::mark_dscp;
 
 #[cfg(target_os = "linux")]
+use crate::transport::icmp::raw as icmp_raw;
+#[cfg(target_os = "linux")]
 use crate::transport::paqet::{raw, spoof};
 
 use super::SpoofParams;
@@ -32,6 +34,8 @@ enum Kind {
     Paqet(Arc<raw::RawSocket>),
     #[cfg(target_os = "linux")]
     Spoof(Arc<spoof::SpoofSocket>),
+    #[cfg(target_os = "linux")]
+    Icmp(Arc<icmp_raw::IcmpSocket>),
 }
 
 impl PacketSocket {
@@ -112,6 +116,48 @@ impl PacketSocket {
         }
     }
 
+    /// Binds the raw ICMP carrier listener (Linux IPv4 only).
+    pub(crate) fn icmp_listen(
+        addr: SocketAddr,
+        buffer: usize,
+        dscp: Option<u8>,
+    ) -> io::Result<Self> {
+        #[cfg(target_os = "linux")]
+        {
+            let socket = Arc::new(icmp_raw::IcmpSocket::listen(addr, buffer, dscp)?);
+            let local = socket.local_addr();
+            Ok(Self {
+                kind: Kind::Icmp(socket),
+                local,
+                peer: None,
+            })
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (addr, buffer, dscp);
+            Err(unsupported())
+        }
+    }
+
+    /// Creates the dialing side of the raw ICMP carrier (Linux IPv4 only).
+    pub(crate) fn icmp_dial(peer: SocketAddr, buffer: usize, dscp: Option<u8>) -> io::Result<Self> {
+        #[cfg(target_os = "linux")]
+        {
+            let socket = Arc::new(icmp_raw::IcmpSocket::dial(peer, buffer, dscp)?);
+            let local = socket.local_addr();
+            Ok(Self {
+                kind: Kind::Icmp(socket),
+                local,
+                peer: Some(peer),
+            })
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (peer, buffer, dscp);
+            Err(unsupported())
+        }
+    }
+
     /// Binds the spoofing raw carrier listener (Linux IPv4 only).
     pub(crate) fn spoof_listen(
         addr: SocketAddr,
@@ -179,6 +225,10 @@ impl PacketSocket {
             Kind::Paqet(_) => true,
             #[cfg(target_os = "linux")]
             Kind::Spoof(_) => true,
+            // ICMP's IP + echo header is 28 bytes, as a UDP packet's is, so it is metered
+            // on the plain counters.
+            #[cfg(target_os = "linux")]
+            Kind::Icmp(_) => false,
         }
     }
 
@@ -190,6 +240,8 @@ impl PacketSocket {
             Kind::Paqet(socket) => socket.recv(buf).await.map(|(len, _)| len),
             #[cfg(target_os = "linux")]
             Kind::Spoof(socket) => socket.recv(buf).await.map(|(len, _)| len),
+            #[cfg(target_os = "linux")]
+            Kind::Icmp(socket) => socket.recv(buf).await.map(|(len, _)| len),
         }
     }
 
@@ -201,6 +253,8 @@ impl PacketSocket {
             Kind::Paqet(socket) => socket.recv(buf).await,
             #[cfg(target_os = "linux")]
             Kind::Spoof(socket) => socket.recv(buf).await,
+            #[cfg(target_os = "linux")]
+            Kind::Icmp(socket) => socket.recv(buf).await,
         }
     }
 
@@ -213,6 +267,8 @@ impl PacketSocket {
             Kind::Paqet(socket) => socket.try_send(payload, _scratch),
             #[cfg(target_os = "linux")]
             Kind::Spoof(socket) => socket.try_send_to(payload, None, _scratch),
+            #[cfg(target_os = "linux")]
+            Kind::Icmp(socket) => socket.try_send(payload, _scratch),
         }
     }
 
@@ -235,6 +291,8 @@ impl PacketSocket {
                 };
                 socket.try_send_to(payload, flow, _scratch)
             }
+            #[cfg(target_os = "linux")]
+            Kind::Icmp(socket) => socket.try_send_to(payload, peer, _scratch),
         }
     }
 }

@@ -84,6 +84,10 @@ pub enum TransportKind {
     /// address is forged, for a Layer-3 whitelist firewall. Needs a network that permits
     /// source spoofing. Linux and IPv4 only. See `[tunnel.spoof]`.
     Spoof,
+    /// KCP packets in the payload of ICMP echo messages over a Linux IPv4 raw socket,
+    /// encrypted with an `icmp`-specific key from the token. Firewall rules added by
+    /// itself. Linux and IPv4 only.
+    Icmp,
 }
 
 impl TransportKind {
@@ -98,6 +102,7 @@ impl TransportKind {
             Self::Paqet => "paqet",
             Self::Auto => "auto",
             Self::Spoof => "spoof",
+            Self::Icmp => "icmp",
         }
     }
 
@@ -970,6 +975,11 @@ const KCP_MTU_FEC: usize = 1429;
 const PAQET_MTU: usize = 1430;
 /// With FEC, 43 bytes are added instead of 30: 1500 - 20 - 20 - 43 = 1417.
 const PAQET_MTU_FEC: usize = 1417;
+/// icmp adds an 8-byte ICMP echo header to the sealed packet and the kernel adds 20 bytes
+/// of IPv4 header: 1500 - 20 - 8 - 30 (sealed KCP packet) = 1442.
+const ICMP_MTU: usize = 1442;
+/// With FEC, 43 bytes are added instead of 30: 1500 - 20 - 8 - 43 = 1429.
+const ICMP_MTU_FEC: usize = 1429;
 const KCP_FEC_DATA: std::ops::RangeInclusive<usize> = 1..=64;
 const KCP_FEC_PARITY: std::ops::RangeInclusive<usize> = 1..=32;
 const MUX_MIN_LIFETIME_SECS: u64 = 60;
@@ -1077,7 +1087,11 @@ impl Config {
         }
         let unreliable = matches!(
             self.tunnel.transport,
-            TransportKind::Kcp | TransportKind::Paqet | TransportKind::Spoof | TransportKind::Quic
+            TransportKind::Kcp
+                | TransportKind::Paqet
+                | TransportKind::Spoof
+                | TransportKind::Icmp
+                | TransportKind::Quic
         ) && self.mux().enabled;
         if self.forward.iter().any(|f| f.duplication().is_some()) && !unreliable {
             warnings.push(
@@ -1150,6 +1164,18 @@ impl Config {
                 bail!("transport = \"spoof\" is only supported on Linux");
             }
             self.validate_spoof()?;
+        }
+        if self.tunnel.transport == TransportKind::Icmp {
+            if !cfg!(feature = "kcp") {
+                bail!(
+                    "transport = \"icmp\" is not in this build (built without the `kcp` \
+                     cargo feature)"
+                );
+            }
+            if !cfg!(target_os = "linux") {
+                bail!("transport = \"icmp\" is only supported on Linux");
+            }
+            self.validate_paqet_addresses_named("icmp")?;
         }
         if self.tunnel.token.trim().len() < 16 {
             bail!(
@@ -1336,11 +1362,15 @@ impl Config {
         };
         if !matches!(
             self.tunnel.transport,
-            TransportKind::Kcp | TransportKind::Paqet | TransportKind::Auto | TransportKind::Spoof
+            TransportKind::Kcp
+                | TransportKind::Paqet
+                | TransportKind::Auto
+                | TransportKind::Spoof
+                | TransportKind::Icmp
         ) {
             bail!(
-                "[tunnel.kcp] is only used with transport = \"kcp\", \"paqet\", \"spoof\" \
-                 or \"auto\""
+                "[tunnel.kcp] is only used with transport = \"kcp\", \"paqet\", \"spoof\", \
+                 \"icmp\" or \"auto\""
             );
         }
         let manual = [
@@ -1413,6 +1443,21 @@ impl Config {
                 bail!(
                     "tunnel.kcp.mtu must be at most {max} bytes with transport = \"paqet\" \
                      (a 20-byte TCP header and a 20-byte IPv4 header are added; with FEC the \
+                     packet is larger)"
+                );
+            }
+        }
+        if self.tunnel.transport == TransportKind::Icmp {
+            let effective = self.kcp();
+            let max = if effective.fec().is_some() {
+                ICMP_MTU_FEC
+            } else {
+                ICMP_MTU
+            };
+            if effective.mtu > max {
+                bail!(
+                    "tunnel.kcp.mtu must be at most {max} bytes with transport = \"icmp\" \
+                     (an 8-byte ICMP header and a 20-byte IPv4 header are added; with FEC the \
                      packet is larger)"
                 );
             }

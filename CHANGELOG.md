@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.2.0 - 2026-11-14
+
+New transports, each a sibling of an existing one, so the handshake, encryption, mux and KCP
+layers above them are unchanged. Both servers need 1.2.0.
+
+- **`icmp`** — the encrypted KCP of `paqet`, carried in the payload of ICMP echo (ping)
+  packets over a raw socket, for the hardest routes where both UDP and TCP are blocked or
+  throttled but ping still gets through. IPv4 and Linux only, needs root (or `CAP_NET_RAW`).
+  The service opens the raw socket and adds scoped host firewall rules of its own (dropping
+  only the kernel's own echo replies to the peer, so the traffic does not double), and removes
+  them when it stops. The ICMP echo identifier stands in for a port, so several tunnels — and
+  the host's own `ping` — stay apart. In the panel: pick *ICMP (ping)* as the transport in the
+  tunnel wizard and editor. Sample configs: `configs/entry-icmp.toml`, `configs/exit-icmp.toml`.
+  Guide: [Transports](docs/transports.md#icmp).
+
 ## 1.1.0 - 2026-11-13
 
 - **Two new ways to carry a `ws` / `wss` tunnel** (`[tunnel.ws] mode`, both servers 1.1.0):

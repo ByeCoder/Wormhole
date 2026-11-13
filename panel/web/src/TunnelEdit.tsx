@@ -240,8 +240,8 @@ export function TunnelEdit({ tunnel, servers, preset, onBack }: { tunnel: Tunnel
     mode,
     transport: joinTransport(transport, muxOn).core,
     profile,
-    // Paqet listens on every IPv4 address (the panel gives an older listening agent its own one).
-    listen: `${transport === "paqet" || transport === "spoof" ? "0.0.0.0" : listenHost}:${listenPort}`,
+    // Paqet, spoof and icmp listen on every IPv4 address (the panel gives an older paqet listening agent its own one).
+    listen: `${transport === "paqet" || transport === "spoof" || transport === "icmp" ? "0.0.0.0" : listenHost}:${listenPort}`,
     dial: `${dialHost.includes(":") && !dialHost.startsWith("[") ? `[${dialHost}]` : dialHost}:${listenPort}`,
     network: netId || undefined,
     pool,
@@ -275,7 +275,7 @@ export function TunnelEdit({ tunnel, servers, preset, onBack }: { tunnel: Tunnel
   // Dialed at an IPv6 address, the accepting side listens on every address, IPv6 too (on every IPv4 one it
   // would never answer).
   useEffect(() => {
-    if (transport !== "paqet" && !netId && isV6(dialHost) && listenHost === "0.0.0.0") setListenHost("[::]");
+    if (transport !== "paqet" && transport !== "icmp" && !netId && isV6(dialHost) && listenHost === "0.0.0.0") setListenHost("[::]");
   }, [dialHost, netId, listenHost, transport]);
 
   // Paqet runs over the public IPv4 addresses only: a private network is let go (back to the public
@@ -284,7 +284,7 @@ export function TunnelEdit({ tunnel, servers, preset, onBack }: { tunnel: Tunnel
   // (Once, when Paqet is chosen, the tunnel is loaded or the accepting server changes: an IPv6 address typed
   // afterwards is not replaced under the cursor, it gets the IPv4-only error.)
   useEffect(() => {
-    if (transport !== "paqet" || !netReady) return;
+    if ((transport !== "paqet" && transport !== "icmp") || !netReady) return;
     if (netId) {
       // Back to the public addresses, at the accepting server's IPv4 one.
       setNetId("");
@@ -315,7 +315,7 @@ export function TunnelEdit({ tunnel, servers, preset, onBack }: { tunnel: Tunnel
     if (moved && [entry, exit].some((id) => !online(id))) return t("te.moveOffline");
     if (!/^\d{1,5}$/.test(listenPort) || +listenPort < 1 || +listenPort > 65535) return t("wz.port", { server: serverName(acceptor) });
     if (!dialHost.trim() && !netId) return t("wz.dial", { server: serverName(acceptor), other: serverName(dialer) });
-    if (transport === "paqet" && isV6(dialHost)) return t("paqet.ip");
+    if ((transport === "paqet" || transport === "icmp") && isV6(dialHost)) return t("paqet.ip");
     if (isWs && !wsPath.startsWith("/")) return t("wz.wsPath");
     if (transport === "wss" && !tlsReady(tls)) return t(tls.mode === "own" ? "tls.needOwn" : "tls.needCert");
     if (!cipherReady(enc, transport, encAck)) return t("enc.needAck");
@@ -476,7 +476,7 @@ export function TunnelEdit({ tunnel, servers, preset, onBack }: { tunnel: Tunnel
           <fieldset className="card edit-sec" disabled={locked}>
             <legend>{t("te.where")}</legend>
             <p className="muted small">{t("wz.lead3", { acceptor: serverName(acceptor), dialer: serverName(dialer) })}</p>
-            <GreChoice value={netId} onChange={chooseNetwork} networks={networks} links={links} entry={entry} exit={exit} acceptor={acceptor} port={listenPort} serverName={serverName} blocked={transport === "paqet" ? t("paqet.noNetwork") : undefined} />
+            <GreChoice value={netId} onChange={chooseNetwork} networks={networks} links={links} entry={entry} exit={exit} acceptor={acceptor} port={listenPort} serverName={serverName} blocked={transport === "icmp" ? t("icmp.noNetwork") : transport === "paqet" ? t("paqet.noNetwork") : undefined} />
             {!netId && loadedHost !== null && !!linkWithAddress(links, loadedHost) && <p className="help warn-text">{t("te.greOff")}</p>}
             <div className="grid-2">
               <div className="field">
@@ -488,10 +488,10 @@ export function TunnelEdit({ tunnel, servers, preset, onBack }: { tunnel: Tunnel
               <div className="field" hidden={!!netId}>
                 <label htmlFor="te-dial">{t("wz.dial", { server: serverName(acceptor), other: serverName(dialer) })}</label>
                 <input className="text mono" id="te-dial" dir="ltr" value={dialHost} placeholder="203.0.113.5" onChange={(e) => setDialHost(e.target.value.trim())} />
-                {transport === "paqet" && <span className="help">{t("paqet.ipv4Only")}</span>}
-                {(transport === "paqet" ? ipv4Choices : choices).length > 0 && (
+                {(transport === "paqet" || transport === "icmp") && <span className="help">{transport === "icmp" ? t("icmp.ipv4Only") : t("paqet.ipv4Only")}</span>}
+                {((transport === "paqet" || transport === "icmp") ? ipv4Choices : choices).length > 0 && (
                   <span className="addr-chips">
-                    {(transport === "paqet" ? ipv4Choices : choices).map((a) => (
+                    {((transport === "paqet" || transport === "icmp") ? ipv4Choices : choices).map((a) => (
                       <button key={a} type="button" className={`pchip as-btn ${a === dialHost ? "on" : ""}`} dir="ltr" onClick={() => setDialHost(a)}>
                         {a}
                       </button>

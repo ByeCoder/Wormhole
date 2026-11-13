@@ -8,6 +8,7 @@
 //! `httpupgrade` and `tls` modes (`tunnel.ws.mode`) are the same code with the framing
 //! (and for `tls`, the HTTP upgrade) left out.
 
+pub mod icmp;
 #[cfg(feature = "kcp")]
 pub mod kcp;
 #[cfg(not(feature = "kcp"))]
@@ -60,6 +61,7 @@ impl Settings {
         let kcp = match tunnel.transport {
             TransportKind::Paqet => kcp::KcpParams::new_paqet(tunnel, kcp),
             TransportKind::Spoof => kcp::KcpParams::new_spoof(tunnel, kcp),
+            TransportKind::Icmp => kcp::KcpParams::new_icmp(tunnel, kcp),
             _ => kcp::KcpParams::new(tunnel, kcp),
         };
         Self {
@@ -103,7 +105,10 @@ impl Listener {
         };
         match settings.kind {
             TransportKind::Quic | TransportKind::Auto => return Err(not_a_stream_transport()),
-            TransportKind::Kcp | TransportKind::Paqet | TransportKind::Spoof => {
+            TransportKind::Kcp
+            | TransportKind::Paqet
+            | TransportKind::Spoof
+            | TransportKind::Icmp => {
                 let listener = kcp::KcpListener::bind(addr, &settings.kcp, tuning).await?;
                 return Ok(Self::Kcp(listener));
             }
@@ -115,6 +120,7 @@ impl Listener {
             | TransportKind::Kcp
             | TransportKind::Paqet
             | TransportKind::Spoof
+            | TransportKind::Icmp
             | TransportKind::Auto => unreachable!("handled above"),
             TransportKind::Tcp | TransportKind::Tcpmux => Ok(Self::Tcp(tcp)),
             TransportKind::Ws | TransportKind::Wss => Ok(Self::Ws(
@@ -242,7 +248,7 @@ impl Dialer {
     pub fn new(settings: &Settings, addr: &str, tuning: &Tuning) -> io::Result<Self> {
         if matches!(
             settings.kind,
-            TransportKind::Kcp | TransportKind::Paqet | TransportKind::Spoof
+            TransportKind::Kcp | TransportKind::Paqet | TransportKind::Spoof | TransportKind::Icmp
         ) {
             return Ok(Self::Kcp(kcp::KcpDialer::new(addr, &settings.kcp, tuning)));
         }
@@ -251,7 +257,10 @@ impl Dialer {
         let (config, tls) = match settings.kind {
             TransportKind::Tcp | TransportKind::Tcpmux => return Ok(Self::Tcp(tcp)),
             TransportKind::Quic | TransportKind::Auto => return Err(not_a_stream_transport()),
-            TransportKind::Kcp | TransportKind::Paqet | TransportKind::Spoof => {
+            TransportKind::Kcp
+            | TransportKind::Paqet
+            | TransportKind::Spoof
+            | TransportKind::Icmp => {
                 unreachable!("handled above")
             }
             TransportKind::Ws => (ws::ClientConfig::new(ws, addr, "http", 80), None),

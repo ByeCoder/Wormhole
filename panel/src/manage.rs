@@ -374,16 +374,19 @@ pub fn wanted_ports(spec: &Spec) -> Vec<(&'static str, u16)> {
         // Paqet listens on a raw TCP port: the kernel's TCP stack (with scoped RST
         // suppression) sees the port, so a TCP conflict must be reported like any other.
         // Such a raw listener does not appear in `/proc/net/tcp`; the tunnel's own port is
-        // excluded by `check` below, from the spec it is replacing.
+        // excluded by `check` below, from the spec it is replacing. icmp has no kernel
+        // port at all (its "port" is an ICMP identifier), so it reserves nothing.
         let udp = matches!(spec.transport.as_str(), "quic" | "kcp");
-        if let Some(p) = spec.listen.as_deref().and_then(port) {
-            out.push((if udp { "udp" } else { "tcp" }, p));
-            // Auto listens for all of its transports: UDP on the port too, and a
-            // WebSocket on the next one.
-            if spec.transport == "auto" {
-                out.push(("udp", p));
-                if let Some(next) = p.checked_add(1) {
-                    out.push(("tcp", next));
+        if spec.transport != "icmp" {
+            if let Some(p) = spec.listen.as_deref().and_then(port) {
+                out.push((if udp { "udp" } else { "tcp" }, p));
+                // Auto listens for all of its transports: UDP on the port too, and a
+                // WebSocket on the next one.
+                if spec.transport == "auto" {
+                    out.push(("udp", p));
+                    if let Some(next) = p.checked_add(1) {
+                        out.push(("tcp", next));
+                    }
                 }
             }
         }
