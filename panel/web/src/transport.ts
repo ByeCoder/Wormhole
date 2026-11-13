@@ -1,10 +1,10 @@
 import type { MuxSpec } from "./api";
 
 /** The transports a person chooses from. `tcp` with mux on is the core's `tcpmux`; with mux off, plain `tcp`. */
-export const TRANSPORTS = ["auto", "tcp", "ws", "wss", "quic", "kcp", "paqet", "spoof", "icmp"] as const;
+export const TRANSPORTS = ["auto", "tcp", "ws", "wss", "quic", "kcp", "paqet", "spoof", "icmp", "dns"] as const;
 
 /** Transports where mux can be turned off (`auto` and `quic` always multiplex). */
-export const MUX_OPTIONAL = ["tcp", "ws", "wss", "kcp", "paqet", "icmp"];
+export const MUX_OPTIONAL = ["tcp", "ws", "wss", "kcp", "paqet", "icmp", "dns"];
 
 /** Transports that ride a raw IPv4 TCP carrier (IPv4 only, listen on 0.0.0.0, no GRE). */
 export const RAW_TCP = ["paqet", "spoof"];
@@ -29,7 +29,7 @@ export function joinTransport(transport: string, mux: boolean): { core: string; 
 /** The ports a management link uses on `port` (TCP and UDP, and the next one), for a firewall: all of them for auto, else the one transport's. */
 export function linkPorts(port: number, transport: string): string {
   if (transport === "auto") return `TCP ${port}, UDP ${port}, TCP ${port + 1}, UDP ${port + 1}`;
-  if (transport === "kcp") return `UDP ${port}`;
+  if (transport === "kcp" || transport === "dns") return `UDP ${port}`;
   if (transport === "quic") return `UDP ${port + 1}`;
   if (transport === "wss") return `TCP ${port + 1}`;
   if (transport === "icmp") return `ICMP echo (IP protocol 1)`;

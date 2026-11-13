@@ -225,6 +225,11 @@ impl PairRequest {
         self.transport == "icmp"
     }
 
+    /// Whether this is a `dns` tunnel (KCP in DNS query/response over UDP).
+    fn needs_dns(&self) -> bool {
+        self.transport == "dns"
+    }
+
     /// A Paqet tunnel listens on every IPv4 address (`0.0.0.0`), as the other transports
     /// do. Its listening agent knows that from [`PAQET_ANY_SINCE`]; an older one gets
     /// its own IPv4 address instead (the one its route to the internet leaves from, as
@@ -334,6 +339,7 @@ impl PairRequest {
         let anything_new = self.needs_new_servers()
             || self.needs_paqet()
             || self.needs_icmp()
+            || self.needs_dns()
             || self.chosen_encryption().is_some()
             || self.sealed()
             || self.needs_2_4().0
@@ -420,6 +426,10 @@ impl PairRequest {
         // The icmp transport came with 1.2.0; both sides take part.
         if self.needs_icmp() && !release_at_least(version, ICMP_SINCE) {
             bail!("old_agent_icmp:{id}:{version}");
+        }
+        // The dns transport came with 1.2.0; both sides take part.
+        if self.needs_dns() && !release_at_least(version, DNS_SINCE) {
+            bail!("old_agent_dns:{id}:{version}");
         }
         Ok(())
     }
@@ -576,6 +586,9 @@ pub const WS_MODE_SINCE: &str = "1.1.0";
 
 /// The first release with the `icmp` transport (KCP in ICMP echo over a raw socket).
 pub const ICMP_SINCE: &str = "1.2.0";
+
+/// The first release with the `dns` transport (KCP in DNS query/response over UDP).
+pub const DNS_SINCE: &str = "1.2.0";
 
 /// A `paqet` tunnel's `[tunnel.kcp]` table, and only its: an empty table is the same as
 /// none, and another transport never gets the table (the core refuses it there).

@@ -25,6 +25,7 @@ flowchart TD
 | `kcp` | KCP over UDP, every packet encrypted, optional FEC | lossy links where TCP collapses; games |
 | [`paqet`](paqet.md) | the same encrypted KCP, in raw TCP segments with no handshake (IPv4, Linux) | UDP is blocked or throttled but TCP gets through |
 | `icmp` | the same encrypted KCP, in the payload of ICMP echo (ping) packets (IPv4, Linux, root) | UDP and TCP are blocked but ping still gets through |
+| `dns` | the same encrypted KCP, wrapped in DNS query/response messages over UDP 53 | only DNS passes; a direct server-to-server link |
 
 Everything except `quic` runs the same layers on top: the handshake (mutual
 authentication with the token, X25519 for forward secrecy), AEAD records, and mux.
@@ -200,6 +201,36 @@ Both ends send echo requests (never replies), so there is no ping/pong pairing; 
 sequence and identifier fields carry the two ends' identifiers so replies find their way,
 and the two ends differ even on loopback. Needs 1.2.0 on both servers.
 
+## `dns`
+
+`transport = "dns"` carries the packets of `kcp` (sealed with the token) wrapped in **DNS
+query/response messages** over UDP. The dialing side sends queries, the listening side
+responses, so a filter that passes only DNS on UDP 53 lets the tunnel through.
+
+```toml
+[tunnel]
+transport = "dns"
+listen = "0.0.0.0:53"         # acceptor: UDP 53, where a DNS filter expects traffic (needs root)
+# remote = "203.0.113.9:53"   # dialer: the peer's address and DNS port
+```
+
+- **A direct server-to-server tunnel, not through a resolver.** Because the two servers
+  talk straight to each other, the sealed packet rides whole in a record's RDATA rather
+  than being squeezed into the query name (which a real recursive resolver would cap). It
+  looks like DNS to a filter on the path; it will not survive being forwarded through a
+  real DNS server.
+- **Port 53 needs root** (or `CAP_NET_BIND_SERVICE`) on the listening side, to bind the
+  privileged port. The dialing side needs nothing special.
+- **Works over IPv4 and IPv6**, and over a private network if you like (unlike the raw
+  transports).
+- **A small MTU.** Each packet is wrapped in a DNS message kept within a common EDNS0
+  buffer, so the KCP MTU is capped (about 1136 bytes); throughput is lower than the other
+  transports. DNS is a last-resort carrier.
+- **The same settings as `kcp`:** the profile, `[tunnel.mux]` and `[tuning]`.
+
+In the panel: pick *DNS* as the transport in the tunnel wizard and editor. Needs 1.2.0 on
+both servers.
+
 ## `wss` with a real certificate
 
 By default a listening `wss` side serves a self-signed certificate that the dialing side pins.
@@ -299,6 +330,6 @@ most providers' terms of service.
 ## Modes and transports
 
 Every transport works in both modes. The listening side needs its port reachable:
-TCP for `tcp`, `tcpmux`, `ws`, `wss` and `paqet`, UDP for `quic` and `kcp`, and ICMP echo for
-`icmp` (no port at all). For `paqet` and `icmp`, Wormhole opens its own host firewall; a
-firewall in front of the server still has to let the TCP port (or ICMP) through.
+TCP for `tcp`, `tcpmux`, `ws`, `wss` and `paqet`, UDP for `quic`, `kcp` and `dns`, and ICMP
+echo for `icmp` (no port at all). For `paqet` and `icmp`, Wormhole opens its own host
+firewall; a firewall in front of the server still has to let the TCP port (or ICMP) through.

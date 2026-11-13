@@ -61,6 +61,7 @@ const PAQET_KEY_CONTEXT: &str = "wormhole 2026-10 paqet packets v1";
 /// Spoof's packet key context: a spoof packet cannot be opened as a kcp or paqet one.
 const SPOOF_KEY_CONTEXT: &str = "wormhole 2026-11 spoof packets v1";
 const ICMP_KEY_CONTEXT: &str = "wormhole 2026-11 icmp packets v1";
+const DNS_KEY_CONTEXT: &str = "wormhole 2026-11 dns packets v1";
 
 /// Packet types, the first byte of a packet's plaintext.
 const PACKET_DATA: u8 = 0;
@@ -146,6 +147,7 @@ enum CarrierKind {
     Paqet,
     Spoof,
     Icmp,
+    Dns,
 }
 
 impl fmt::Debug for KcpParams {
@@ -198,6 +200,17 @@ impl KcpParams {
             config,
             key: Psk::new(&tunnel.token).subkey(ICMP_KEY_CONTEXT),
             carrier: CarrierKind::Icmp,
+            spoof: None,
+        }
+    }
+
+    /// `transport = "dns"`: the same KCP settings and packet format, with a key of its own
+    /// and a UDP carrier that wraps each packet in a DNS query or response.
+    pub fn new_dns(tunnel: &TunnelConfig, config: KcpConfig) -> Self {
+        Self {
+            config,
+            key: Psk::new(&tunnel.token).subkey(DNS_KEY_CONTEXT),
+            carrier: CarrierKind::Dns,
             spoof: None,
         }
     }
@@ -256,9 +269,12 @@ impl ConnSettings {
     }
 
     /// Whether the carrier is a raw IPv4 one (paqet, spoof or icmp): resolution is then
-    /// IPv4-only.
+    /// IPv4-only. UDP-based carriers (udp, dns) work over IPv6 too.
     fn ipv4_only(&self) -> bool {
-        !matches!(self.carrier, CarrierKind::Udp)
+        matches!(
+            self.carrier,
+            CarrierKind::Paqet | CarrierKind::Spoof | CarrierKind::Icmp
+        )
     }
 }
 
@@ -1375,6 +1391,8 @@ impl KcpDialer {
             off_runtime(move || PacketSocket::icmp_dial(peer, buffer, dscp)).await?
         } else if self.settings.carrier == CarrierKind::Paqet {
             off_runtime(move || PacketSocket::paqet_dial(peer, buffer, dscp)).await?
+        } else if self.settings.carrier == CarrierKind::Dns {
+            PacketSocket::dns_dial(peer, buffer, dscp).await?
         } else {
             PacketSocket::udp_connect(peer, buffer, dscp).await?
         };
@@ -1429,6 +1447,8 @@ impl KcpListener {
             off_runtime(move || PacketSocket::icmp_listen(addr, buffer, dscp)).await?
         } else if settings.carrier == CarrierKind::Paqet {
             off_runtime(move || PacketSocket::paqet_listen(addr, buffer, dscp)).await?
+        } else if settings.carrier == CarrierKind::Dns {
+            PacketSocket::dns_listen(addr, buffer, dscp)?
         } else {
             PacketSocket::udp_bind(addr, buffer, dscp)?
         };

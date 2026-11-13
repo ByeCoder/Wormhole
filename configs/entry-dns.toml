@@ -1,0 +1,23 @@
+# Entry side (Iran), reverse mode over dns: KCP wrapped in DNS query/response messages
+# over UDP, for a path that lets only DNS through. Pair: exit-dns.toml.
+#
+# Wormhole is a direct server-to-server tunnel, so these messages do not go through a
+# recursive resolver; they only have to look like DNS to a filter on UDP 53. The listening
+# side binds UDP port 53, which needs root (or CAP_NET_BIND_SERVICE). Works over IPv4 and
+# IPv6. Every packet is encrypted with a dns-specific key from the token, and the KCP mtu
+# is capped so each DNS message stays within a common EDNS0 buffer.
+role = "entry"
+mode = "reverse"
+profile = "balanced"
+
+[tunnel]
+transport = "dns"
+listen = "0.0.0.0:53"              # UDP 53: the port a DNS filter expects (needs root)
+token = "CHANGE-ME-run-wormhole-token"
+
+[[forward]]
+listen = "0.0.0.0:443"
+target = "127.0.0.1:443"
+
+[log]
+level = "info"

@@ -8,6 +8,7 @@
 //! `httpupgrade` and `tls` modes (`tunnel.ws.mode`) are the same code with the framing
 //! (and for `tls`, the HTTP upgrade) left out.
 
+pub mod dns;
 pub mod icmp;
 #[cfg(feature = "kcp")]
 pub mod kcp;
@@ -62,6 +63,7 @@ impl Settings {
             TransportKind::Paqet => kcp::KcpParams::new_paqet(tunnel, kcp),
             TransportKind::Spoof => kcp::KcpParams::new_spoof(tunnel, kcp),
             TransportKind::Icmp => kcp::KcpParams::new_icmp(tunnel, kcp),
+            TransportKind::Dns => kcp::KcpParams::new_dns(tunnel, kcp),
             _ => kcp::KcpParams::new(tunnel, kcp),
         };
         Self {
@@ -108,7 +110,8 @@ impl Listener {
             TransportKind::Kcp
             | TransportKind::Paqet
             | TransportKind::Spoof
-            | TransportKind::Icmp => {
+            | TransportKind::Icmp
+            | TransportKind::Dns => {
                 let listener = kcp::KcpListener::bind(addr, &settings.kcp, tuning).await?;
                 return Ok(Self::Kcp(listener));
             }
@@ -121,6 +124,7 @@ impl Listener {
             | TransportKind::Paqet
             | TransportKind::Spoof
             | TransportKind::Icmp
+            | TransportKind::Dns
             | TransportKind::Auto => unreachable!("handled above"),
             TransportKind::Tcp | TransportKind::Tcpmux => Ok(Self::Tcp(tcp)),
             TransportKind::Ws | TransportKind::Wss => Ok(Self::Ws(
@@ -248,7 +252,11 @@ impl Dialer {
     pub fn new(settings: &Settings, addr: &str, tuning: &Tuning) -> io::Result<Self> {
         if matches!(
             settings.kind,
-            TransportKind::Kcp | TransportKind::Paqet | TransportKind::Spoof | TransportKind::Icmp
+            TransportKind::Kcp
+                | TransportKind::Paqet
+                | TransportKind::Spoof
+                | TransportKind::Icmp
+                | TransportKind::Dns
         ) {
             return Ok(Self::Kcp(kcp::KcpDialer::new(addr, &settings.kcp, tuning)));
         }
@@ -260,7 +268,8 @@ impl Dialer {
             TransportKind::Kcp
             | TransportKind::Paqet
             | TransportKind::Spoof
-            | TransportKind::Icmp => {
+            | TransportKind::Icmp
+            | TransportKind::Dns => {
                 unreachable!("handled above")
             }
             TransportKind::Ws => (ws::ClientConfig::new(ws, addr, "http", 80), None),

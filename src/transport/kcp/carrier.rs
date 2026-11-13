@@ -11,6 +11,7 @@ use tracing::debug;
 
 use crate::transport::mark_dscp;
 
+use crate::transport::dns::packet as dns_packet;
 #[cfg(target_os = "linux")]
 use crate::transport::icmp::raw as icmp_raw;
 #[cfg(target_os = "linux")]
@@ -30,6 +31,12 @@ pub(crate) struct PacketSocket {
 #[derive(Clone)]
 enum Kind {
     Udp(Arc<UdpSocket>),
+    /// A UDP socket whose datagrams are wrapped in DNS messages (`respond`: a response on
+    /// the listening side, a query on the dialing side).
+    Dns {
+        socket: Arc<UdpSocket>,
+        respond: bool,
+    },
     #[cfg(target_os = "linux")]
     Paqet(Arc<raw::RawSocket>),
     #[cfg(target_os = "linux")]
@@ -65,6 +72,47 @@ impl PacketSocket {
         socket.connect(peer).await?;
         Ok(Self {
             kind: Kind::Udp(Arc::new(socket)),
+            local,
+            peer: Some(peer),
+        })
+    }
+
+    /// Binds the DNS carrier listener: a UDP socket that answers with DNS responses.
+    pub(crate) fn dns_listen(
+        addr: SocketAddr,
+        buffer: usize,
+        dscp: Option<u8>,
+    ) -> io::Result<Self> {
+        let socket = bind_udp(addr, buffer, dscp)?;
+        let local = socket.local_addr()?;
+        Ok(Self {
+            kind: Kind::Dns {
+                socket: Arc::new(socket),
+                respond: true,
+            },
+            local,
+            peer: None,
+        })
+    }
+
+    /// Creates the dialing side of the DNS carrier: a UDP socket that sends DNS queries.
+    pub(crate) async fn dns_dial(
+        peer: SocketAddr,
+        buffer: usize,
+        dscp: Option<u8>,
+    ) -> io::Result<Self> {
+        let local = match peer {
+            SocketAddr::V4(_) => SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0)),
+            SocketAddr::V6(_) => SocketAddr::from((Ipv6Addr::UNSPECIFIED, 0)),
+        };
+        let socket = bind_udp(local, buffer, dscp)?;
+        let local = socket.local_addr()?;
+        socket.connect(peer).await?;
+        Ok(Self {
+            kind: Kind::Dns {
+                socket: Arc::new(socket),
+                respond: false,
+            },
             local,
             peer: Some(peer),
         })
@@ -221,6 +269,7 @@ impl PacketSocket {
     pub(crate) fn is_paqet(&self) -> bool {
         match &self.kind {
             Kind::Udp(_) => false,
+            Kind::Dns { .. } => false,
             #[cfg(target_os = "linux")]
             Kind::Paqet(_) => true,
             #[cfg(target_os = "linux")]
@@ -236,6 +285,13 @@ impl PacketSocket {
     pub(crate) async fn recv(&self, buf: &mut [u8]) -> io::Result<usize> {
         match &self.kind {
             Kind::Udp(socket) => socket.recv(buf).await,
+            // Skip any datagram on :53 that is not one of ours (a stray real query, say).
+            Kind::Dns { socket, .. } => loop {
+                let n = socket.recv(buf).await?;
+                if let Some(len) = dns_payload_to_front(buf, n) {
+                    return Ok(len);
+                }
+            },
             #[cfg(target_os = "linux")]
             Kind::Paqet(socket) => socket.recv(buf).await.map(|(len, _)| len),
             #[cfg(target_os = "linux")]
@@ -249,6 +305,12 @@ impl PacketSocket {
     pub(crate) async fn recv_from(&self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
         match &self.kind {
             Kind::Udp(socket) => socket.recv_from(buf).await,
+            Kind::Dns { socket, .. } => loop {
+                let (n, peer) = socket.recv_from(buf).await?;
+                if let Some(len) = dns_payload_to_front(buf, n) {
+                    return Ok((len, peer));
+                }
+            },
             #[cfg(target_os = "linux")]
             Kind::Paqet(socket) => socket.recv(buf).await,
             #[cfg(target_os = "linux")]
@@ -263,6 +325,10 @@ impl PacketSocket {
     pub(crate) fn try_send(&self, payload: &[u8], _scratch: &mut Vec<u8>) -> io::Result<usize> {
         match &self.kind {
             Kind::Udp(socket) => socket.try_send(payload),
+            Kind::Dns { socket, respond } => {
+                dns_wrap(payload, *respond, _scratch)?;
+                socket.try_send(_scratch)
+            }
             #[cfg(target_os = "linux")]
             Kind::Paqet(socket) => socket.try_send(payload, _scratch),
             #[cfg(target_os = "linux")]
@@ -281,6 +347,10 @@ impl PacketSocket {
     ) -> io::Result<usize> {
         match &self.kind {
             Kind::Udp(socket) => socket.try_send_to(payload, peer),
+            Kind::Dns { socket, respond } => {
+                dns_wrap(payload, *respond, _scratch)?;
+                socket.try_send_to(_scratch, peer)
+            }
             #[cfg(target_os = "linux")]
             Kind::Paqet(socket) => socket.try_send_to(payload, peer, _scratch),
             #[cfg(target_os = "linux")]
@@ -314,6 +384,23 @@ fn spoof_addrs(params: &SpoofParams, real_port: u16) -> io::Result<spoof::SpoofA
         peer_real: params.peer_real.unwrap_or(std::net::Ipv4Addr::UNSPECIFIED),
         src_port: params.port.unwrap_or(real_port),
     })
+}
+
+/// Wraps `payload` in a DNS message (a response when `respond`, else a query) in `out`,
+/// with a random transaction id as a real client uses.
+fn dns_wrap(payload: &[u8], respond: bool, out: &mut Vec<u8>) -> io::Result<()> {
+    let id = u16::from_le_bytes(crate::crypto::random_bytes::<2>().unwrap_or([0, 1]));
+    dns_packet::encode(out, respond, id, payload)
+}
+
+/// Decodes the DNS message in `buf[..n]` and moves its payload to the front of `buf`,
+/// returning the payload's length, or `None` if it is not one of ours.
+fn dns_payload_to_front(buf: &mut [u8], n: usize) -> Option<usize> {
+    let payload = dns_packet::decode(buf.get(..n)?)?;
+    let start = payload.as_ptr() as usize - buf.as_ptr() as usize;
+    let len = payload.len();
+    buf.copy_within(start..start + len, 0);
+    Some(len)
 }
 
 pub(super) fn bind_udp(addr: SocketAddr, buffer: usize, dscp: Option<u8>) -> io::Result<UdpSocket> {

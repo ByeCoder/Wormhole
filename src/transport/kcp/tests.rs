@@ -300,6 +300,56 @@ fn icmp_uses_its_own_packet_key() {
     assert_ne!(psk.subkey(PAQET_KEY_CONTEXT), psk.subkey(ICMP_KEY_CONTEXT));
 }
 
+fn params_dns(key: u8) -> KcpParams {
+    KcpParams {
+        config: KcpConfig::default(),
+        key: [key; 32],
+        carrier: CarrierKind::Dns,
+        spoof: None,
+    }
+}
+
+#[test]
+fn dns_uses_its_own_packet_key() {
+    let psk = Psk::new("dns-key-separation-test");
+    assert_ne!(psk.subkey(KEY_CONTEXT), psk.subkey(DNS_KEY_CONTEXT));
+    assert_ne!(psk.subkey(ICMP_KEY_CONTEXT), psk.subkey(DNS_KEY_CONTEXT));
+}
+
+/// The dns carrier over a real UDP socket on loopback. No raw socket or root needed, so
+/// this always runs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dns_round_trip_over_udp() {
+    let l = KcpListener::bind("127.0.0.1:0", &params_dns(1), &tuning())
+        .await
+        .expect("bound");
+    let addr = l.local_addr().unwrap().to_string();
+    let dialer = KcpDialer::new(&addr, &params_dns(1), &tuning());
+    let client = tokio::time::timeout(Duration::from_secs(5), dialer.dial())
+        .await
+        .expect("dialed in time")
+        .expect("dialed");
+    let server = accept(&l).await;
+
+    let (client_datagrams, server_datagrams) = (
+        client.datagrams().expect("datagram side"),
+        server.datagrams().expect("datagram side"),
+    );
+    assert!(client_datagrams.send(b"dns datagram", false));
+    let datagram = tokio::time::timeout(Duration::from_secs(5), server_datagrams.recv())
+        .await
+        .expect("datagram in time")
+        .expect("stream open");
+    assert_eq!(&datagram[..], b"dns datagram");
+
+    echo(server);
+    let got = tokio::time::timeout(Duration::from_secs(20), round_trip(client, b"over dns"))
+        .await
+        .expect("round trip in time")
+        .unwrap();
+    assert_eq!(got, b"over dns");
+}
+
 /// A real raw ICMP socket on loopback. Root (or CAP_NET_RAW) and an opt-in are needed:
 /// `WORMHOLE_ICMP_IT=1 cargo test --lib --features kcp icmp_round_trip`.
 #[cfg(target_os = "linux")]

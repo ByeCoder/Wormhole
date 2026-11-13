@@ -376,7 +376,7 @@ pub fn wanted_ports(spec: &Spec) -> Vec<(&'static str, u16)> {
         // Such a raw listener does not appear in `/proc/net/tcp`; the tunnel's own port is
         // excluded by `check` below, from the spec it is replacing. icmp has no kernel
         // port at all (its "port" is an ICMP identifier), so it reserves nothing.
-        let udp = matches!(spec.transport.as_str(), "quic" | "kcp");
+        let udp = matches!(spec.transport.as_str(), "quic" | "kcp" | "dns");
         if spec.transport != "icmp" {
             if let Some(p) = spec.listen.as_deref().and_then(port) {
                 out.push((if udp { "udp" } else { "tcp" }, p));

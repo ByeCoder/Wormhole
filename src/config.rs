@@ -88,6 +88,10 @@ pub enum TransportKind {
     /// encrypted with an `icmp`-specific key from the token. Firewall rules added by
     /// itself. Linux and IPv4 only.
     Icmp,
+    /// KCP packets wrapped in DNS query/response messages over UDP (port 53 on the
+    /// listening side), encrypted with a `dns`-specific key from the token. For paths that
+    /// pass only DNS. Works over IPv4 and IPv6.
+    Dns,
 }
 
 impl TransportKind {
@@ -103,6 +107,7 @@ impl TransportKind {
             Self::Auto => "auto",
             Self::Spoof => "spoof",
             Self::Icmp => "icmp",
+            Self::Dns => "dns",
         }
     }
 
@@ -980,6 +985,12 @@ const PAQET_MTU_FEC: usize = 1417;
 const ICMP_MTU: usize = 1442;
 /// With FEC, 43 bytes are added instead of 30: 1500 - 20 - 8 - 43 = 1429.
 const ICMP_MTU_FEC: usize = 1429;
+/// dns wraps each sealed packet in a DNS message (about 68 bytes of header, question and
+/// record) over UDP. Capping the KCP mtu here keeps the whole message within a common
+/// EDNS0 buffer (1232 bytes): 1232 - 68 - 28 (seal) = 1136.
+const DNS_MTU: usize = 1136;
+/// With FEC, 43 bytes are added instead of 30: 1136 - 13 = 1123.
+const DNS_MTU_FEC: usize = 1123;
 const KCP_FEC_DATA: std::ops::RangeInclusive<usize> = 1..=64;
 const KCP_FEC_PARITY: std::ops::RangeInclusive<usize> = 1..=32;
 const MUX_MIN_LIFETIME_SECS: u64 = 60;
@@ -1091,6 +1102,7 @@ impl Config {
                 | TransportKind::Paqet
                 | TransportKind::Spoof
                 | TransportKind::Icmp
+                | TransportKind::Dns
                 | TransportKind::Quic
         ) && self.mux().enabled;
         if self.forward.iter().any(|f| f.duplication().is_some()) && !unreliable {
@@ -1176,6 +1188,12 @@ impl Config {
                 bail!("transport = \"icmp\" is only supported on Linux");
             }
             self.validate_paqet_addresses_named("icmp")?;
+        }
+        if self.tunnel.transport == TransportKind::Dns && !cfg!(feature = "kcp") {
+            bail!(
+                "transport = \"dns\" is not in this build (built without the `kcp` cargo \
+                 feature)"
+            );
         }
         if self.tunnel.token.trim().len() < 16 {
             bail!(
@@ -1367,10 +1385,11 @@ impl Config {
                 | TransportKind::Auto
                 | TransportKind::Spoof
                 | TransportKind::Icmp
+                | TransportKind::Dns
         ) {
             bail!(
                 "[tunnel.kcp] is only used with transport = \"kcp\", \"paqet\", \"spoof\", \
-                 \"icmp\" or \"auto\""
+                 \"icmp\", \"dns\" or \"auto\""
             );
         }
         let manual = [
@@ -1462,6 +1481,21 @@ impl Config {
                 );
             }
         }
+        if self.tunnel.transport == TransportKind::Dns {
+            let effective = self.kcp();
+            let max = if effective.fec().is_some() {
+                DNS_MTU_FEC
+            } else {
+                DNS_MTU
+            };
+            if effective.mtu > max {
+                bail!(
+                    "tunnel.kcp.mtu must be at most {max} bytes with transport = \"dns\" \
+                     (each packet is wrapped in a DNS message; this keeps it within a common \
+                     EDNS0 buffer)"
+                );
+            }
+        }
         Ok(())
     }
 
@@ -1470,6 +1504,12 @@ impl Config {
     /// `fec_parity`, or an MTU too large for FEC.
     pub fn kcp(&self) -> KcpConfig {
         let mut k = self.tunnel.kcp.clone().unwrap_or_default();
+        // dns wraps every packet in a DNS message, which must stay small; lower the
+        // default mtu to its cap when the user has not chosen one of their own (an explicit
+        // mtu over the cap is reported by validation instead).
+        if self.tunnel.transport == TransportKind::Dns && k.mtu == default_kcp_mtu() {
+            k.mtu = DNS_MTU;
+        }
         let unset = k.fec_data.is_none() && k.fec_parity.is_none();
         if self.profile == Profile::Gaming && unset && k.mtu <= KCP_MTU_FEC {
             (k.fec_data, k.fec_parity) = (Some(10), Some(3));

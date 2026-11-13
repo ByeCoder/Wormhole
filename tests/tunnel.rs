@@ -351,6 +351,17 @@ impl Setup {
         }
     }
 
+    /// dns: KCP over UDP, each packet wrapped in a DNS query/response. UDP like kcp, so the
+    /// same short keepalive. No raw socket or root needed, so it runs here.
+    const fn dns(mode: &'static str) -> Self {
+        Self {
+            transport: "dns",
+            mux: true,
+            keepalive_secs: 5,
+            ..Self::tcp(mode)
+        }
+    }
+
     const fn no_mux(self) -> Self {
         Self { mux: false, ..self }
     }
@@ -945,6 +956,9 @@ tunnel_tests! {
     kcp_reverse_no_mux: Setup::kcp("reverse").no_mux();
     kcp_direct_no_mux_chacha: Setup::kcp("direct").no_mux().encryption("chacha20-poly1305");
     kcp_reverse_fec: Setup::kcp("reverse").fec(10, 3);
+    dns_reverse: Setup::dns("reverse");
+    dns_direct: Setup::dns("direct");
+    dns_reverse_no_mux: Setup::dns("reverse").no_mux();
     auto_reverse: Setup::tcp("reverse").transport("auto").mux();
     auto_direct: Setup::tcp("direct").transport("auto").mux();
 }

@@ -14,6 +14,14 @@ layers above them are unchanged. Both servers need 1.2.0.
   the host's own `ping` — stay apart. In the panel: pick *ICMP (ping)* as the transport in the
   tunnel wizard and editor. Sample configs: `configs/entry-icmp.toml`, `configs/exit-icmp.toml`.
   Guide: [Transports](docs/transports.md#icmp).
+- **`dns`** — the encrypted KCP of `kcp`, wrapped in DNS query/response messages over UDP
+  (port 53 on the listening side), for paths that pass only DNS. A direct server-to-server
+  tunnel, so the sealed packet rides whole in a record's RDATA (not squeezed into the query
+  name) and does not go through a recursive resolver. Works over IPv4 and IPv6; binding port
+  53 needs root. The KCP MTU is capped so each DNS message stays within a common EDNS0 buffer,
+  so throughput is lower — DNS is a last resort. In the panel: pick *DNS* as the transport.
+  Sample configs: `configs/entry-dns.toml`, `configs/exit-dns.toml`. Guide:
+  [Transports](docs/transports.md#dns).
 
 ## 1.1.0 - 2026-11-13
 

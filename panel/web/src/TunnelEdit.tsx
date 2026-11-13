@@ -483,7 +483,7 @@ export function TunnelEdit({ tunnel, servers, preset, onBack }: { tunnel: Tunnel
                 <label htmlFor="te-port">{t("wz.port", { server: serverName(acceptor) })}</label>
                 <input className="text mono" id="te-port" dir="ltr" inputMode="numeric" value={listenPort} onChange={(e) => setListenPort(e.target.value.trim())} />
                 {transport === "auto" && <span className="help">{t("wz.autoPorts", { server: serverName(acceptor), tcp: listenPort, udp: listenPort, ws: String(+listenPort + 1) })}</span>}
-                {(transport === "quic" || transport === "kcp") && <span className="help">{t("wz.portUdp")}</span>}
+                {(transport === "quic" || transport === "kcp" || transport === "dns") && <span className="help">{t("wz.portUdp")}</span>}
               </div>
               <div className="field" hidden={!!netId}>
                 <label htmlFor="te-dial">{t("wz.dial", { server: serverName(acceptor), other: serverName(dialer) })}</label>

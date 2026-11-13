@@ -180,7 +180,7 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
   const greLink = netId ? linkBetween(links, netId, entry, exit) : undefined;
   // The tunnel listens on the private address of the server that accepts it, in either mode.
   const greAddr = greLink ? (greLink.a === acceptor ? greLink.addr_a : greLink.addr_b) : "";
-  const udp = transport === "quic" || transport === "kcp";
+  const udp = transport === "quic" || transport === "kcp" || transport === "dns";
   const isWs = transport === "ws" || transport === "wss";
 
   // The accepting server's address, as the other one reaches it. A new tunnel starts from

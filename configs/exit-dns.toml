@@ -1,0 +1,15 @@
+# Exit side (abroad), reverse mode over dns. Pair: entry-dns.toml.
+#
+# `remote`'s port is the entry side's DNS port (53). The exit side dials out, so it does
+# not need a privileged port of its own.
+role = "exit"
+mode = "reverse"
+profile = "balanced"
+
+[tunnel]
+transport = "dns"
+remote = "ENTRY_SERVER_IP:53"
+token = "CHANGE-ME-run-wormhole-token"
+
+[log]
+level = "info"
