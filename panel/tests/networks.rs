@@ -221,6 +221,7 @@ async fn links_are_made_on_both_servers_reused_undone_and_protected() {
         ws_path: None,
         ws_mode: None,
         ws_host: None,
+        shadowtls_handshake: None,
         tls_sni: None,
         mux: None,
         encryption: None,

@@ -42,6 +42,10 @@ pub struct PairRequest {
     pub ws_mode: Option<String>,
     pub ws_host: Option<String>,
     pub tls_sni: Option<String>,
+    /// `shadowtls` only: the real site to borrow a TLS appearance from, the same on both
+    /// sides.
+    #[serde(default)]
+    pub shadowtls_handshake: Option<String>,
     /// Mux settings, the same on both sides; left out, the profile's apply.
     #[serde(default)]
     pub mux: Option<crate::wire::MuxSpec>,
@@ -164,6 +168,7 @@ impl PairRequest {
                 .then(|| self.proxy_version().map(str::to_owned))
                 .flatten(),
             tls_sni: (!accepts).then(|| self.dial_sni()).flatten(),
+            shadowtls_handshake: self.shadowtls_handshake.clone(),
             tls_pin: (!accepts && self.transport == "wss" && self.tls_cert.is_none())
                 .then(|| pin.map(str::to_owned))
                 .flatten(),
@@ -238,6 +243,11 @@ impl PairRequest {
     /// Whether this is an `xhttp` tunnel (the tunnel over streaming HTTP/1.1).
     fn needs_xhttp(&self) -> bool {
         self.transport == "xhttp"
+    }
+
+    /// Whether this is a `shadowtls` tunnel (camouflage TLS to a real site).
+    fn needs_shadowtls(&self) -> bool {
+        self.transport == "shadowtls"
     }
 
     /// A Paqet tunnel listens on every IPv4 address (`0.0.0.0`), as the other transports
@@ -352,6 +362,7 @@ impl PairRequest {
             || self.needs_dns()
             || self.needs_grpc()
             || self.needs_xhttp()
+            || self.needs_shadowtls()
             || self.chosen_encryption().is_some()
             || self.sealed()
             || self.needs_2_4().0
@@ -450,6 +461,10 @@ impl PairRequest {
         // The xhttp transport came with 1.2.0; both sides take part.
         if self.needs_xhttp() && !release_at_least(version, XHTTP_SINCE) {
             bail!("old_agent_xhttp:{id}:{version}");
+        }
+        // The shadowtls transport came with 1.2.0; both sides take part.
+        if self.needs_shadowtls() && !release_at_least(version, SHADOWTLS_SINCE) {
+            bail!("old_agent_shadowtls:{id}:{version}");
         }
         Ok(())
     }
@@ -615,6 +630,9 @@ pub const GRPC_SINCE: &str = "1.2.0";
 
 /// The first release with the `xhttp` transport (the tunnel over streaming HTTP/1.1).
 pub const XHTTP_SINCE: &str = "1.2.0";
+
+/// The first release with the `shadowtls` transport (camouflage TLS to a real site).
+pub const SHADOWTLS_SINCE: &str = "1.2.0";
 
 /// A `paqet` tunnel's `[tunnel.kcp]` table, and only its: an empty table is the same as
 /// none, and another transport never gets the table (the core refuses it there).
@@ -1808,6 +1826,7 @@ mod tests {
             ws_path: None,
             ws_mode: None,
             ws_host: None,
+            shadowtls_handshake: None,
             tls_sni: None,
             mux: None,
             tls_cert: None,
@@ -1866,6 +1885,7 @@ mod tests {
             ws_path: None,
             ws_mode: None,
             ws_host: None,
+            shadowtls_handshake: None,
             tls_sni: None,
             mux: None,
             tls_cert: None,
@@ -1931,6 +1951,7 @@ mod tests {
             ws_path: None,
             ws_mode: None,
             ws_host: None,
+            shadowtls_handshake: None,
             tls_sni: None,
             mux: None,
             encryption: None,
@@ -1975,6 +1996,7 @@ mod tests {
             ws_path: None,
             ws_mode: None,
             ws_host: None,
+            shadowtls_handshake: None,
             tls_sni: None,
             mux: max_streams.map(|v| crate::wire::MuxSpec {
                 max_streams: Some(v),
@@ -2026,6 +2048,7 @@ mod tests {
             ws_path: None,
             ws_mode: None,
             ws_host: None,
+            shadowtls_handshake: None,
             tls_sni: None,
             mux: None,
             encryption: None,
@@ -2110,6 +2133,7 @@ mod tests {
             ws_path: None,
             ws_mode: None,
             ws_host: None,
+            shadowtls_handshake: None,
             tls_sni: None,
             mux: None,
             encryption: None,
@@ -2173,6 +2197,7 @@ mod tests {
             ws_path: None,
             ws_mode: None,
             ws_host: None,
+            shadowtls_handshake: None,
             tls_sni: None,
             mux,
             quic_obfs: false,
@@ -2234,6 +2259,7 @@ mod tests {
             ws_path: Some("/".into()),
             ws_mode: None,
             ws_host: ws_host.map(str::to_owned),
+            shadowtls_handshake: None,
             tls_sni: sni.map(str::to_owned),
             mux: None,
             encryption: None,

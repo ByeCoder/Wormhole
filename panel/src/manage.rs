@@ -204,6 +204,11 @@ pub fn render(spec: &Spec, token: &str, cert_files: Option<(&Path, &Path)>) -> R
         }
         tunnel.insert("tls".into(), Value::Table(tls));
     }
+    if let Some(handshake) = &spec.shadowtls_handshake {
+        let mut st = Table::new();
+        st.insert("handshake".into(), text(handshake));
+        tunnel.insert("shadowtls".into(), Value::Table(st));
+    }
     root.insert("tunnel".into(), Value::Table(tunnel));
     let mut tuning = Table::new();
     if let Some(limit) = spec.max_conns_per_ip.filter(|v| *v > 0) {
@@ -619,6 +624,7 @@ pub fn get(dir: &Path, name: &str) -> Result<Spec> {
         kcp,
         spoof,
         tls_sni: c.tunnel.tls.as_ref().and_then(|t| t.sni.clone()),
+        shadowtls_handshake: c.tunnel.shadowtls.as_ref().map(|s| s.handshake.clone()),
         tls_cert: c
             .tunnel
             .tls

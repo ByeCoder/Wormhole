@@ -285,6 +285,42 @@ listen = "0.0.0.0:8080"       # acceptor: the HTTP port the CDN/proxy forwards t
 In the panel: pick *XHTTP* as the transport in the tunnel wizard and editor. Needs 1.2.0 on
 both servers.
 
+## `shadowtls`
+
+`transport = "shadowtls"` makes the tunnel port **look like an ordinary HTTPS mirror of a
+real website**. The listening side watches the incoming TLS ClientHello: a real Wormhole
+client proves itself by the server name (SNI) it sends, derived from the tunnel token; any
+other probe is relayed byte-for-byte to the genuine site, so an active prober sees that
+site's real certificate and handshake. The idea follows ShadowTLS v3.
+
+```toml
+[tunnel]
+transport = "shadowtls"
+listen = "0.0.0.0:443"        # acceptor: looks like an HTTPS site
+# remote = "203.0.113.9:443"  # dialer: the peer's endpoint
+
+[tunnel.shadowtls]
+handshake = "www.microsoft.com:443"   # the real site to imitate; same on both sides
+```
+
+- **Active-probe resistance by relay.** A client whose SNI does not carry a valid
+  token-keyed tag is not rejected (which would stand out) but transparently proxied to
+  `handshake`, so the port is indistinguishable from a reverse proxy in front of that site.
+- **The token is the secret.** The SNI a real client sends is `<nonce>.<base>` with a
+  keyed BLAKE3 tag over the nonce, verified on the listening side; a probe cannot forge it
+  without the token.
+- **A stream transport**, like `tcp` and `ws`: once the camouflage TLS is established the
+  handshake, encryption and `[tunnel.mux]` run on top. The outer TLS uses an ephemeral
+  self-signed certificate for real clients (they do not check it — the token already
+  authenticated the peer); probes get the real site's certificate via the relay.
+- **`handshake` must be a reachable HTTPS host as `host:port`** (a DNS name, not a bare IP,
+  since it is also used as the SNI). Both sides must set the same value.
+- **No root. IPv4 or IPv6.**
+
+This is a rustls-based camouflage, not a byte-exact clone of a specific proxy's wire
+format; it does not need your own certificate (unlike `wss`). In the panel: pick
+*ShadowTLS* as the transport and fill in the handshake site. Needs 1.2.0 on both servers.
+
 ## `wss` with a real certificate
 
 By default a listening `wss` side serves a self-signed certificate that the dialing side pins.

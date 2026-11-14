@@ -24,6 +24,8 @@ pub mod quic;
 mod quic_obfs;
 #[cfg(feature = "quic")]
 mod quic_wire;
+#[cfg(feature = "shadowtls")]
+pub mod shadowtls;
 pub mod tcp;
 pub mod tls;
 pub mod ws;
@@ -56,6 +58,10 @@ pub struct Settings {
     pub ws: Option<WsConfig>,
     pub tls: Option<TlsConfig>,
     pub kcp: kcp::KcpParams,
+    /// The tunnel token, for transports that authenticate the carrier (`shadowtls`).
+    pub token: String,
+    /// `[tunnel.shadowtls]`, for the `shadowtls` transport.
+    pub shadowtls: Option<crate::config::ShadowtlsConfig>,
 }
 
 impl Settings {
@@ -74,6 +80,8 @@ impl Settings {
             ws: tunnel.ws.clone(),
             tls: tunnel.tls.clone(),
             kcp,
+            token: tunnel.token.clone(),
+            shadowtls: tunnel.shadowtls.clone(),
         }
     }
 }
@@ -90,6 +98,8 @@ pub enum Listener {
     #[cfg(feature = "grpc")]
     Grpc(tcp::TcpTransportListener),
     Xhttp(tcp::TcpTransportListener),
+    #[cfg(feature = "shadowtls")]
+    Shadowtls(tcp::TcpTransportListener, String, String),
 }
 
 impl Listener {
@@ -136,6 +146,25 @@ impl Listener {
             let tcp = tcp::TcpTransportListener::bind(addr, tuning).await?;
             return Ok(Self::Xhttp(tcp));
         }
+        #[cfg(feature = "shadowtls")]
+        if settings.kind == TransportKind::Shadowtls {
+            let st = settings.shadowtls.as_ref().ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "shadowtls needs [tunnel.shadowtls]",
+                )
+            })?;
+            let tcp = tcp::TcpTransportListener::bind(addr, tuning).await?;
+            return Ok(Self::Shadowtls(
+                tcp,
+                settings.token.clone(),
+                st.handshake.clone(),
+            ));
+        }
+        #[cfg(not(feature = "shadowtls"))]
+        if settings.kind == TransportKind::Shadowtls {
+            return Err(shadowtls_not_built());
+        }
         let tcp = tcp::TcpTransportListener::bind(addr, tuning).await?;
         match settings.kind {
             TransportKind::Quic
@@ -146,6 +175,7 @@ impl Listener {
             | TransportKind::Dns
             | TransportKind::Grpc
             | TransportKind::Xhttp
+            | TransportKind::Shadowtls
             | TransportKind::Auto => unreachable!("handled above"),
             TransportKind::Tcp | TransportKind::Tcpmux => Ok(Self::Tcp(tcp)),
             TransportKind::Ws | TransportKind::Wss => Ok(Self::Ws(
@@ -189,6 +219,14 @@ impl Listener {
                 let (s, peer) = l.accept().await?;
                 Ok((Incoming::Xhttp(link_guard(&s), s, peer), peer))
             }
+            #[cfg(feature = "shadowtls")]
+            Self::Shadowtls(l, token, handshake) => {
+                let (s, peer) = l.accept().await?;
+                Ok((
+                    Incoming::Shadowtls(link_guard(&s), s, peer, token.clone(), handshake.clone()),
+                    peer,
+                ))
+            }
         }
     }
 
@@ -199,6 +237,8 @@ impl Listener {
             #[cfg(feature = "grpc")]
             Self::Grpc(l) => l.local_addr(),
             Self::Xhttp(l) => l.local_addr(),
+            #[cfg(feature = "shadowtls")]
+            Self::Shadowtls(l, ..) => l.local_addr(),
         }
     }
 }
@@ -218,6 +258,8 @@ pub enum Incoming {
     #[cfg(feature = "grpc")]
     Grpc(TcpGuard, TcpStream, SocketAddr),
     Xhttp(TcpGuard, TcpStream, SocketAddr),
+    #[cfg(feature = "shadowtls")]
+    Shadowtls(TcpGuard, TcpStream, SocketAddr, String, String),
 }
 
 impl Incoming {
@@ -246,6 +288,16 @@ impl Incoming {
                     xhttp::XhttpWriter::new(w),
                 );
                 Ok(TunnelStream::Xhttp(guard, stream))
+            }
+            #[cfg(feature = "shadowtls")]
+            Self::Shadowtls(guard, stream, _peer, token, handshake) => {
+                match shadowtls::accept(stream, &token, &handshake).await? {
+                    Some(s) => Ok(TunnelStream::Shadow(guard, s)),
+                    None => Err(io::Error::new(
+                        io::ErrorKind::ConnectionAborted,
+                        "shadowtls relayed an active probe",
+                    )),
+                }
             }
             Self::Ws {
                 guard,
@@ -293,6 +345,8 @@ pub enum Dialer {
     #[cfg(feature = "grpc")]
     Grpc(tcp::TcpTransportDialer, String),
     Xhttp(tcp::TcpTransportDialer, String),
+    #[cfg(feature = "shadowtls")]
+    Shadowtls(tcp::TcpTransportDialer, String, String),
 }
 
 /// WebSocket part of a [`Dialer`].
@@ -328,6 +382,24 @@ impl Dialer {
         if settings.kind == TransportKind::Xhttp {
             return Ok(Self::Xhttp(tcp, addr.to_string()));
         }
+        #[cfg(feature = "shadowtls")]
+        if settings.kind == TransportKind::Shadowtls {
+            let st = settings.shadowtls.as_ref().ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "shadowtls needs [tunnel.shadowtls]",
+                )
+            })?;
+            return Ok(Self::Shadowtls(
+                tcp,
+                settings.token.clone(),
+                host_only(&st.handshake),
+            ));
+        }
+        #[cfg(not(feature = "shadowtls"))]
+        if settings.kind == TransportKind::Shadowtls {
+            return Err(shadowtls_not_built());
+        }
         let ws = settings.ws.as_ref();
         let (config, tls) = match settings.kind {
             TransportKind::Tcp | TransportKind::Tcpmux => return Ok(Self::Tcp(tcp)),
@@ -338,7 +410,8 @@ impl Dialer {
             | TransportKind::Icmp
             | TransportKind::Dns
             | TransportKind::Grpc
-            | TransportKind::Xhttp => {
+            | TransportKind::Xhttp
+            | TransportKind::Shadowtls => {
                 unreachable!("handled above")
             }
             TransportKind::Ws => (ws::ClientConfig::new(ws, addr, "http", 80), None),
@@ -411,6 +484,17 @@ impl Dialer {
                     out.flush().await?;
                 }
                 Ok(TunnelStream::Xhttp(guard, out))
+            }
+            #[cfg(feature = "shadowtls")]
+            Self::Shadowtls(d, token, base) => {
+                let stream = d.dial().await?;
+                let guard = link_guard(&stream);
+                let mut s = shadowtls::connect(stream, token, base).await?;
+                if !first.is_empty() {
+                    s.write_all(first).await?;
+                    s.flush().await?;
+                }
+                Ok(TunnelStream::Shadow(guard, s))
             }
             Self::Ws(d, ws) => {
                 let stream = d.dial().await?;
@@ -518,6 +602,27 @@ fn grpc_not_built() -> io::Error {
     )
 }
 
+/// The error when `transport = "shadowtls"` is selected in a build without the feature.
+#[cfg(not(feature = "shadowtls"))]
+fn shadowtls_not_built() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::Unsupported,
+        "transport = \"shadowtls\" is not in this build (built without the `shadowtls` cargo feature)",
+    )
+}
+
+/// The host part of a `host:port` (or a bare host), for the dialer's SNI base.
+#[cfg(feature = "shadowtls")]
+fn host_only(handshake: &str) -> String {
+    if let Some(rest) = handshake.strip_prefix('[') {
+        return rest.split(']').next().unwrap_or(rest).to_owned();
+    }
+    match handshake.rsplit_once(':') {
+        Some((host, port)) if port.parse::<u16>().is_ok() => host.to_owned(),
+        _ => handshake.to_owned(),
+    }
+}
+
 fn link_guard(stream: &TcpStream) -> TcpGuard {
     wire::meter().track(stream, Leg::Link)
 }
@@ -544,6 +649,8 @@ pub enum TunnelStream {
     #[cfg(feature = "grpc")]
     Grpc(TcpGuard, grpc::GrpcStream),
     Xhttp(TcpGuard, xhttp::XhttpStream),
+    #[cfg(feature = "shadowtls")]
+    Shadow(TcpGuard, shadowtls::ShadowStream),
 }
 
 impl TunnelStream {
@@ -555,6 +662,8 @@ impl TunnelStream {
             #[cfg(feature = "grpc")]
             Self::Grpc(..) => None,
             Self::Xhttp(..) => None,
+            #[cfg(feature = "shadowtls")]
+            Self::Shadow(..) => None,
         }
     }
 
@@ -566,6 +675,8 @@ impl TunnelStream {
             #[cfg(feature = "grpc")]
             Self::Grpc(..) => return Ok(()),
             Self::Xhttp(..) => return Ok(()),
+            #[cfg(feature = "shadowtls")]
+            Self::Shadow(..) => return Ok(()),
             Self::Ws(_, s) => s.reader().has_early(),
             Self::Wss(_, s) => s.reader().has_early(),
         };
@@ -584,6 +695,8 @@ impl TunnelStream {
             #[cfg(feature = "grpc")]
             Self::Grpc(..) => false,
             Self::Xhttp(..) => false,
+            #[cfg(feature = "shadowtls")]
+            Self::Shadow(..) => false,
             Self::Ws(_, s) => s.reject_upgrade(),
             Self::Wss(_, s) => s.reject_upgrade(),
         }
@@ -602,6 +715,14 @@ impl TunnelStream {
             #[cfg(feature = "grpc")]
             Self::Grpc(_, s) => s.is_alive(),
             Self::Xhttp(_, s) => s.is_alive(),
+            #[cfg(feature = "shadowtls")]
+            Self::Shadow(_, s) => {
+                let waker = Waker::from(Arc::new(NoopWaker));
+                let mut buf = ReadBuf::new(&mut probe);
+                Pin::new(s)
+                    .poll_read(&mut Context::from_waker(&waker), &mut buf)
+                    .is_pending()
+            }
             // Anything from the peer (even a ping) means the connection is not idle.
             Self::Ws(_, s) => {
                 !s.reader().has_buffered() && would_block(s.reader().get_ref().try_read(&mut probe))
@@ -639,6 +760,8 @@ impl AsyncRead for TunnelStream {
             #[cfg(feature = "grpc")]
             Self::Grpc(_, s) => Pin::new(s).poll_read(cx, buf),
             Self::Xhttp(_, s) => Pin::new(s).poll_read(cx, buf),
+            #[cfg(feature = "shadowtls")]
+            Self::Shadow(_, s) => Pin::new(s).poll_read(cx, buf),
         }
     }
 }
@@ -657,6 +780,8 @@ impl AsyncWrite for TunnelStream {
             #[cfg(feature = "grpc")]
             Self::Grpc(_, s) => Pin::new(s).poll_write(cx, buf),
             Self::Xhttp(_, s) => Pin::new(s).poll_write(cx, buf),
+            #[cfg(feature = "shadowtls")]
+            Self::Shadow(_, s) => Pin::new(s).poll_write(cx, buf),
         }
     }
 
@@ -673,6 +798,8 @@ impl AsyncWrite for TunnelStream {
             #[cfg(feature = "grpc")]
             Self::Grpc(_, s) => Pin::new(s).poll_write_vectored(cx, bufs),
             Self::Xhttp(_, s) => Pin::new(s).poll_write_vectored(cx, bufs),
+            #[cfg(feature = "shadowtls")]
+            Self::Shadow(_, s) => Pin::new(s).poll_write_vectored(cx, bufs),
         }
     }
 
@@ -685,6 +812,8 @@ impl AsyncWrite for TunnelStream {
             #[cfg(feature = "grpc")]
             Self::Grpc(..) => false,
             Self::Xhttp(..) => false,
+            #[cfg(feature = "shadowtls")]
+            Self::Shadow(..) => false,
         }
     }
 
@@ -697,6 +826,8 @@ impl AsyncWrite for TunnelStream {
             #[cfg(feature = "grpc")]
             Self::Grpc(_, s) => Pin::new(s).poll_flush(cx),
             Self::Xhttp(_, s) => Pin::new(s).poll_flush(cx),
+            #[cfg(feature = "shadowtls")]
+            Self::Shadow(_, s) => Pin::new(s).poll_flush(cx),
         }
     }
 
@@ -709,6 +840,8 @@ impl AsyncWrite for TunnelStream {
             #[cfg(feature = "grpc")]
             Self::Grpc(_, s) => Pin::new(s).poll_shutdown(cx),
             Self::Xhttp(_, s) => Pin::new(s).poll_shutdown(cx),
+            #[cfg(feature = "shadowtls")]
+            Self::Shadow(_, s) => Pin::new(s).poll_shutdown(cx),
         }
     }
 }
@@ -748,6 +881,14 @@ impl TunnelStream {
                 let (r, w) = s.into_split();
                 (TunnelReader::Xhttp(g.clone(), r), TunnelWriter::Xhttp(g, w))
             }
+            #[cfg(feature = "shadowtls")]
+            Self::Shadow(g, s) => {
+                let (r, w) = tokio::io::split(s);
+                (
+                    TunnelReader::Shadow(g.clone(), r),
+                    TunnelWriter::Shadow(g, w),
+                )
+            }
         }
     }
 }
@@ -761,6 +902,8 @@ pub enum TunnelReader {
     #[cfg(feature = "grpc")]
     Grpc(TcpGuard, grpc::GrpcReader),
     Xhttp(TcpGuard, xhttp::XhttpReader),
+    #[cfg(feature = "shadowtls")]
+    Shadow(TcpGuard, ReadHalf<shadowtls::ShadowStream>),
 }
 
 /// Sending half of a [`TunnelStream`].
@@ -772,6 +915,8 @@ pub enum TunnelWriter {
     #[cfg(feature = "grpc")]
     Grpc(TcpGuard, grpc::GrpcWriter),
     Xhttp(TcpGuard, xhttp::XhttpWriter),
+    #[cfg(feature = "shadowtls")]
+    Shadow(TcpGuard, WriteHalf<shadowtls::ShadowStream>),
 }
 
 impl AsyncRead for TunnelReader {
@@ -788,6 +933,8 @@ impl AsyncRead for TunnelReader {
             #[cfg(feature = "grpc")]
             Self::Grpc(_, s) => Pin::new(s).poll_read(cx, buf),
             Self::Xhttp(_, s) => Pin::new(s).poll_read(cx, buf),
+            #[cfg(feature = "shadowtls")]
+            Self::Shadow(_, s) => Pin::new(s).poll_read(cx, buf),
         }
     }
 }
@@ -806,6 +953,8 @@ impl AsyncWrite for TunnelWriter {
             #[cfg(feature = "grpc")]
             Self::Grpc(_, s) => Pin::new(s).poll_write(cx, buf),
             Self::Xhttp(_, s) => Pin::new(s).poll_write(cx, buf),
+            #[cfg(feature = "shadowtls")]
+            Self::Shadow(_, s) => Pin::new(s).poll_write(cx, buf),
         }
     }
 
@@ -822,6 +971,8 @@ impl AsyncWrite for TunnelWriter {
             #[cfg(feature = "grpc")]
             Self::Grpc(_, s) => Pin::new(s).poll_write_vectored(cx, bufs),
             Self::Xhttp(_, s) => Pin::new(s).poll_write_vectored(cx, bufs),
+            #[cfg(feature = "shadowtls")]
+            Self::Shadow(_, s) => Pin::new(s).poll_write_vectored(cx, bufs),
         }
     }
 
@@ -834,6 +985,8 @@ impl AsyncWrite for TunnelWriter {
             #[cfg(feature = "grpc")]
             Self::Grpc(..) => false,
             Self::Xhttp(..) => false,
+            #[cfg(feature = "shadowtls")]
+            Self::Shadow(..) => false,
         }
     }
 
@@ -846,6 +999,8 @@ impl AsyncWrite for TunnelWriter {
             #[cfg(feature = "grpc")]
             Self::Grpc(_, s) => Pin::new(s).poll_flush(cx),
             Self::Xhttp(_, s) => Pin::new(s).poll_flush(cx),
+            #[cfg(feature = "shadowtls")]
+            Self::Shadow(_, s) => Pin::new(s).poll_flush(cx),
         }
     }
 
@@ -858,6 +1013,8 @@ impl AsyncWrite for TunnelWriter {
             #[cfg(feature = "grpc")]
             Self::Grpc(_, s) => Pin::new(s).poll_shutdown(cx),
             Self::Xhttp(_, s) => Pin::new(s).poll_shutdown(cx),
+            #[cfg(feature = "shadowtls")]
+            Self::Shadow(_, s) => Pin::new(s).poll_shutdown(cx),
         }
     }
 }

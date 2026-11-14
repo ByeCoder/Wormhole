@@ -69,6 +69,7 @@ export function TunnelEdit({ tunnel, servers, preset, onBack }: { tunnel: Tunnel
   const [wsMode, setWsMode] = useState<WsMode>("websocket");
   const [wsHost, setWsHost] = useState("");
   const [sni, setSni] = useState("");
+  const [stHandshake, setStHandshake] = useState("");
   const [pool, setPool] = useState<number | undefined>();
   const [ports, setPorts] = useState("");
   const [protocol, setProtocol] = useState("tcp");
@@ -150,6 +151,7 @@ export function TunnelEdit({ tunnel, servers, preset, onBack }: { tunnel: Tunnel
         const real = acc.tls_cert && acc.tls_key ? { cert: acc.tls_cert, key: acc.tls_key } : null;
         // With a real certificate the server name is the certificate's own (not one to edit).
         setSni(real ? "" : (dia.tls_sni ?? ""));
+        setStHandshake(dia.shadowtls_handshake ?? "");
         setPool(a.pool ?? b.pool);
         const list = a.forwards;
         setPorts(list.map((f) => (portOf(f.listen) === portOf(f.target) ? portOf(f.listen) : `${portOf(f.listen)}=${portOf(f.target)}`)).join(", "));
@@ -249,6 +251,7 @@ export function TunnelEdit({ tunnel, servers, preset, onBack }: { tunnel: Tunnel
     ws_mode: wsModeField(transport, wsMode),
     ws_host: isWs && wsHost.trim() ? wsHost.trim() : undefined,
     tls_sni: transport === "wss" && tls.mode === "self" && sni.trim() ? sni.trim() : undefined,
+    shadowtls_handshake: transport === "shadowtls" && stHandshake.trim() ? stHandshake.trim() : undefined,
     mux: muxSpecOf(mux, transport, muxOn),
     kcp: kcpSpecOf(kcp, transport, profile),
     spoof: spoofOn ? spoofToPair(spoof).spoof : undefined,
@@ -560,7 +563,7 @@ export function TunnelEdit({ tunnel, servers, preset, onBack }: { tunnel: Tunnel
                   </More>
                 )}
               </div>
-              {(isWs || (transport === "tcp" && !muxOn)) && (
+              {(isWs || (transport === "tcp" && !muxOn) || transport === "shadowtls") && (
                 <div className="more-group">
                   <h4 className="more-h">{t("te.where")}</h4>
                   <div className="grid-2">
@@ -582,6 +585,13 @@ export function TunnelEdit({ tunnel, servers, preset, onBack }: { tunnel: Tunnel
                         <label htmlFor="te-sni">{t("wz.sni")}</label>
                         <input className="text mono" id="te-sni" dir="ltr" value={sni} placeholder="www.example.com" onChange={(e) => setSni(e.target.value.trim())} />
                         <span className="help">{t("wz.sniHelp")}</span>
+                      </div>
+                    )}
+                    {transport === "shadowtls" && (
+                      <div className="field">
+                        <label htmlFor="te-sths">{t("wz.shadowtls.handshake")}</label>
+                        <input className="text mono" id="te-sths" dir="ltr" value={stHandshake} placeholder="www.microsoft.com:443" onChange={(e) => setStHandshake(e.target.value.trim())} />
+                        <span className="help">{t("wz.shadowtls.handshakeHelp")}</span>
                       </div>
                     )}
                     {transport === "tcp" && !muxOn && (

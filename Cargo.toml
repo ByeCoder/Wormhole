@@ -63,11 +63,14 @@ webpki-roots = "1"
 libc = "0.2"
 
 [features]
-default = ["quic", "kcp", "grpc", "mimalloc"]
+default = ["quic", "kcp", "grpc", "shadowtls", "mimalloc"]
 # transport = "quic" (quinn).
 quic = ["dep:quinn", "dep:quinn-proto", "dep:rcgen"]
 # transport = "grpc": HTTP/2 over h2, CDN-compatible.
 grpc = ["dep:h2", "dep:http"]
+# transport = "shadowtls": a camouflage TLS layer to a real destination (needs rcgen for
+# the ephemeral self-signed certificate the listener presents to authenticated clients).
+shadowtls = ["dep:rcgen"]
 # transport = "kcp", with FEC.
 kcp = ["dep:kcp", "dep:reed-solomon-simd"]
 # mimalloc as the global allocator of the wormhole binary (musl's own is slow).

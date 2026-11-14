@@ -38,6 +38,17 @@ layers above them are unchanged. Both servers need 1.2.0.
   panel: pick *XHTTP* as the transport. Sample configs: `configs/entry-xhttp.toml`,
   `configs/exit-xhttp.toml`. Guide: [Transports](docs/transports.md#xhttp).
 
+- **`shadowtls`** — a TLS tunnel disguised as a connection to a real HTTPS site
+  (ShadowTLS v3 idea, behind the default-on `shadowtls` cargo feature). The listening side
+  reads the TLS ClientHello: a real client proves itself with a token-keyed server name
+  (SNI) and gets the tunnel; any other probe is relayed byte-for-byte to the genuine
+  `[tunnel.shadowtls] handshake` site, so an active prober sees that site's real
+  certificate and cannot tell the port from a reverse proxy in front of it. A stream
+  transport like `tcp`/`ws`; needs no certificate of your own (unlike `wss`). No root; IPv4
+  or IPv6. In the panel: pick *ShadowTLS* and fill in the handshake site. Sample configs:
+  `configs/entry-shadowtls.toml`, `configs/exit-shadowtls.toml`. Guide:
+  [Transports](docs/transports.md#shadowtls).
+
 Private networks:
 
 - **IPIP** and **Geneve** link kinds, beside GRE and VXLAN, in the panel's private networks.

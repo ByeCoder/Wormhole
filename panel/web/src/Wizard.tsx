@@ -112,6 +112,7 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
   const [wsMode, setWsMode] = useState<WsMode>("websocket");
   const [wsHost, setWsHost] = useState("");
   const [sni, setSni] = useState("");
+  const [stHandshake, setStHandshake] = useState("");
   const [mux, setMux] = useState(emptyMux());
   const [kcp, setKcp] = useState(emptyKcp());
   const [tls, setTls] = useState(emptyTls());
@@ -230,6 +231,7 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
     // A server name typed for a self-signed certificate is not sent with a real one: the
     // other side checks a real one against the name it was issued for (tls_host).
     tls_sni: transport === "wss" && tls.mode === "self" && sni.trim() ? sni.trim() : undefined,
+    shadowtls_handshake: transport === "shadowtls" && stHandshake.trim() ? stHandshake.trim() : undefined,
     mux: muxSpecOf(mux, transport, muxOn),
     kcp: kcpSpecOf(kcp, transport, profile),
     spoof: spoofOn ? spoofToPair(spoof).spoof : undefined,
@@ -559,8 +561,8 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
                     }}
                   />
                 )}
-                {(isWs || (transport === "tcp" && !muxOn)) && (
-                  <More title={t("more.title")} note={whereNote} show={(step === 2 && !!error && isWs) || !!sni}>
+                {(isWs || (transport === "tcp" && !muxOn) || transport === "shadowtls") && (
+                  <More title={t("more.title")} note={whereNote} show={(step === 2 && !!error && isWs) || !!sni || transport === "shadowtls"}>
                     <div className="grid-2 wz-grid">
                       {isWs && (
                         <div className="field">
@@ -580,6 +582,13 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
                           <label htmlFor="wz-sni">{t("wz.sni")}</label>
                           <input className="text mono" id="wz-sni" dir="ltr" value={sni} placeholder="www.example.com" onChange={(e) => setSni(e.target.value.trim())} />
                           <span className="help">{t("wz.sniHelp")}</span>
+                        </div>
+                      )}
+                      {transport === "shadowtls" && (
+                        <div className="field">
+                          <label htmlFor="wz-sths">{t("wz.shadowtls.handshake")}</label>
+                          <input className="text mono" id="wz-sths" dir="ltr" value={stHandshake} placeholder="www.microsoft.com:443" onChange={(e) => setStHandshake(e.target.value.trim())} />
+                          <span className="help">{t("wz.shadowtls.handshakeHelp")}</span>
                         </div>
                       )}
                       {transport === "tcp" && !muxOn && (

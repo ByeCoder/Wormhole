@@ -448,6 +448,7 @@ export interface PairRequest {
   ws_mode?: string;
   ws_host?: string;
   tls_sni?: string;
+  shadowtls_handshake?: string;
   mux?: MuxSpec;
   /** Paqet only: `[tunnel.kcp]` tuning. */
   kcp?: KcpSpec;
@@ -489,6 +490,7 @@ export interface Spec {
   ws_mode?: string;
   ws_host?: string;
   tls_sni?: string;
+  shadowtls_handshake?: string;
   tls_pin?: string;
   mux?: MuxSpec;
   /** Paqet only: the `[tunnel.kcp]` table that was in the file. */

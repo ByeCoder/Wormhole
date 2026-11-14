@@ -98,6 +98,9 @@ pub enum TransportKind {
     /// The tunnel streamed over an ordinary HTTP/1.1 request and response with chunked
     /// bodies (like XHTTP in Xray). A stream transport, like `tcp` and `ws`.
     Xhttp,
+    /// The tunnel inside a TLS connection made to look like traffic to a real site, in the
+    /// spirit of ShadowTLS/REALITY (the rustls-achievable form). A stream transport.
+    Shadowtls,
 }
 
 impl TransportKind {
@@ -116,6 +119,7 @@ impl TransportKind {
             Self::Dns => "dns",
             Self::Grpc => "grpc",
             Self::Xhttp => "xhttp",
+            Self::Shadowtls => "shadowtls",
         }
     }
 
@@ -229,6 +233,8 @@ pub struct TunnelConfig {
     pub kcp: Option<KcpConfig>,
     /// Only for `spoof`: the forged source and the peer's forged source address.
     pub spoof: Option<SpoofConfig>,
+    /// Only for `shadowtls`: the real site to borrow a TLS appearance from.
+    pub shadowtls: Option<ShadowtlsConfig>,
     /// The exit side answers speed test streams (`wormhole speedtest` on the entry side).
     /// They only produce, consume and echo data; they dial nothing.
     #[serde(default = "default_true")]
@@ -248,6 +254,19 @@ pub struct ControlConfig {
 /// `[tunnel.spoof]`: the forged addresses of a `spoof` tunnel. Only read for
 /// `transport = "spoof"`; the core refuses the table for any other transport. `spoof`
 /// reuses every `[tunnel.kcp]` setting of `paqet` for the KCP wire below the carrier.
+/// `[tunnel.shadowtls]`: the camouflage settings of the `shadowtls` transport. The listener
+/// relays unauthenticated connections (active probes) to `handshake`, a real TLS site, so a
+/// prober sees that site; the dialer names a subdomain of the same host as its TLS SNI, so
+/// the connection looks like traffic to it.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ShadowtlsConfig {
+    /// A real TLS site as `host:port` (443 if the port is left off), e.g.
+    /// `www.microsoft.com:443`. The listener relays probes here; the dialer uses `host` as
+    /// its SNI base.
+    pub handshake: String,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SpoofConfig {
@@ -1208,6 +1227,21 @@ impl Config {
                 "transport = \"grpc\" is not in this build (built without the `grpc` cargo \
                  feature)"
             );
+        }
+        if self.tunnel.transport == TransportKind::Shadowtls {
+            if !cfg!(feature = "shadowtls") {
+                bail!(
+                    "transport = \"shadowtls\" is not in this build (built without the \
+                     `shadowtls` cargo feature)"
+                );
+            }
+            match self.tunnel.shadowtls.as_ref() {
+                None => bail!("transport = \"shadowtls\" needs a [tunnel.shadowtls] section"),
+                Some(s) if s.handshake.trim().is_empty() => {
+                    bail!("[tunnel.shadowtls] handshake must be a real site, e.g. www.microsoft.com:443")
+                }
+                Some(_) => {}
+            }
         }
         if self.tunnel.token.trim().len() < 16 {
             bail!(

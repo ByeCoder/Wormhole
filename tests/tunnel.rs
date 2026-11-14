@@ -382,6 +382,16 @@ impl Setup {
         }
     }
 
+    /// shadowtls: the tunnel inside a camouflage TLS connection (TCP underneath). A stream
+    /// transport like tcp/ws.
+    const fn shadowtls(mode: &'static str) -> Self {
+        Self {
+            transport: "shadowtls",
+            mux: true,
+            ..Self::tcp(mode)
+        }
+    }
+
     const fn no_mux(self) -> Self {
         Self { mux: false, ..self }
     }
@@ -448,6 +458,11 @@ impl Setup {
                 };
                 format!("[tunnel.tls]\nsni = \"tunnel.example\"\npin_sha256 = \"{pin}\"\n")
             };
+        }
+        if self.transport == "shadowtls" {
+            // The relay target is only used for unauthenticated probes, not this loopback
+            // test; the dialer uses its host (127.0.0.1) as the SNI base.
+            options += "[tunnel.shadowtls]\nhandshake = \"localhost:1\"\n";
         }
         if self.fec.0 > 0 || !self.kcp_options.is_empty() {
             options += "[tunnel.kcp]\n";
@@ -985,6 +1000,9 @@ tunnel_tests! {
     xhttp_reverse: Setup::xhttp("reverse");
     xhttp_direct: Setup::xhttp("direct");
     xhttp_reverse_no_mux: Setup::xhttp("reverse").no_mux();
+    shadowtls_reverse: Setup::shadowtls("reverse");
+    shadowtls_direct: Setup::shadowtls("direct");
+    shadowtls_reverse_no_mux: Setup::shadowtls("reverse").no_mux();
     auto_reverse: Setup::tcp("reverse").transport("auto").mux();
     auto_direct: Setup::tcp("direct").transport("auto").mux();
 }

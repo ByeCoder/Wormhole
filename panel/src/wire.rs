@@ -423,6 +423,10 @@ pub struct Spec {
     pub tls_sni: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tls_pin: Option<String>,
+    /// A `shadowtls` tunnel's `[tunnel.shadowtls] handshake` (the real site to borrow a TLS
+    /// appearance from), on both sides. Only an agent of 1.2.0 or newer reads it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shadowtls_handshake: Option<String>,
     /// A listening wss side: the certificate and key files of a real certificate (made by
     /// [`Request::TunnelCert`], under `/etc/letsencrypt/live/`) instead of a self-signed one.
     #[serde(default, skip_serializing_if = "Option::is_none")]

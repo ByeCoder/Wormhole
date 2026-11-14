@@ -858,6 +858,7 @@ mod tests {
             ws_path: None,
             ws_mode: None,
             ws_host: None,
+            shadowtls_handshake: None,
             tls_sni: None,
             mux: None,
             encryption: None,
