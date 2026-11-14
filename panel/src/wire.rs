@@ -186,6 +186,9 @@ pub enum LinkKind {
     /// An encrypted WireGuard tunnel (UDP). The panel makes both ends' keys; `port` is the
     /// listen port, shared by both sides.
     Wireguard,
+    /// 6in4 (`sit`): IPv6 carried in an IPv4 packet (IP protocol 41). The underlay is IPv4
+    /// and the link's own addresses are IPv6, unlike every other kind.
+    Sit,
 }
 
 impl LinkKind {
@@ -204,6 +207,12 @@ impl LinkKind {
         *self == Self::Wireguard
     }
 
+    /// Whether the link's own (inner) addresses are IPv6 rather than IPv4: only `sit` (6in4),
+    /// whose whole point is to carry IPv6 over an IPv4 underlay.
+    pub fn inner_v6(&self) -> bool {
+        *self == Self::Sit
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Gre => "gre",
@@ -211,6 +220,7 @@ impl LinkKind {
             Self::Ipip => "ipip",
             Self::Geneve => "geneve",
             Self::Wireguard => "wireguard",
+            Self::Sit => "sit",
         }
     }
 
@@ -221,6 +231,7 @@ impl LinkKind {
             "ipip" => Some(Self::Ipip),
             "geneve" => Some(Self::Geneve),
             "wireguard" => Some(Self::Wireguard),
+            "sit" => Some(Self::Sit),
             _ => None,
         }
     }
@@ -283,6 +294,12 @@ pub struct NetStatus {
     pub wireguard: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wireguard_reason: Option<String>,
+    /// This server can make 6in4 (`sit`) interfaces: the `sit` kernel module is there. An
+    /// agent before 1.2.0 does not say, which reads as no.
+    #[serde(default)]
+    pub sit: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sit_reason: Option<String>,
     #[serde(default)]
     pub links: Vec<NetIface>,
 }

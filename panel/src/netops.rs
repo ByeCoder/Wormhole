@@ -86,14 +86,22 @@ pub(crate) fn spec_for(link: &Link, server: &str, local: &str, remote: &str, mtu
         remote: remote.to_owned(),
         // IPIP and WireGuard carry no VNI/key on the wire; the stored `gre_key` is only the
         // panel's per-pair discriminator, so the agent is sent 0.
-        key: if matches!(link.kind, LinkKind::Ipip | LinkKind::Wireguard) {
+        key: if matches!(
+            link.kind,
+            LinkKind::Ipip | LinkKind::Wireguard | LinkKind::Sit
+        ) {
             0
         } else {
             link.gre_key
         },
         address: if first { &link.addr_a } else { &link.addr_b }.clone(),
         peer: if first { &link.addr_b } else { &link.addr_a }.clone(),
-        prefix: 30,
+        // `sit` uses a /126 over IPv6; every other kind a /30 over IPv4.
+        prefix: if link.kind == LinkKind::Sit {
+            crate::net::SIT_PREFIX
+        } else {
+            30
+        },
         mtu,
         kind: link.kind,
         port: link.port,
@@ -114,6 +122,16 @@ pub(crate) fn spec_for(link: &Link, server: &str, local: &str, remote: &str, mtu
     }
 }
 
+/// `host:port`, bracketing an IPv6 host (`[fd6a:4::1]:443`) as a sit link's own addresses
+/// need. An IPv4 host, or a host that is already bracketed, is left as it is.
+pub fn host_port(host: &str, port: &str) -> String {
+    if host.contains(':') && !host.starts_with('[') {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
+    }
+}
+
 /// The address a tunnel over `link` listens on and dials: the end of the link on the server
 /// that accepts the tunnel's connections (the exit in direct mode, the entry in reverse
 /// mode), with the port of the wizard's listen address.
@@ -123,7 +141,7 @@ pub fn tunnel_endpoint(link: &Link, acceptor: &str, listen: &str) -> String {
     } else {
         &link.addr_b
     };
-    format!("{addr}:{}", listen.rsplit(':').next().unwrap_or("0"))
+    host_port(addr, listen.rsplit(':').next().unwrap_or("0"))
 }
 
 impl Hub {
@@ -362,6 +380,7 @@ async fn bring_up(hub: &Hub, link: &Link) -> Result<(), String> {
             (LinkKind::Geneve, true) => format!("geneve6_blocked:{}", link.port),
             (LinkKind::Wireguard, false) => format!("wireguard_blocked:{}", link.port),
             (LinkKind::Wireguard, true) => format!("wireguard6_blocked:{}", link.port),
+            (LinkKind::Sit, _) => "sit_blocked".to_owned(),
         })
     }
 }
@@ -535,7 +554,7 @@ pub async fn check_kind(hub: &Hub, server: &str, kind: LinkKind, v6: bool) -> Re
     }
     if matches!(
         kind,
-        LinkKind::Ipip | LinkKind::Geneve | LinkKind::Wireguard
+        LinkKind::Ipip | LinkKind::Geneve | LinkKind::Wireguard | LinkKind::Sit
     ) {
         let version = version_of();
         if !crate::pair::version_at_least(&version, NETKIND_SINCE) {
@@ -557,6 +576,8 @@ pub async fn check_kind(hub: &Hub, server: &str, kind: LinkKind, v6: bool) -> Re
         (LinkKind::Geneve, true) if !status.geneve6 => Err(format!("no_geneve6:{server}")),
         // WireGuard uses one kernel module for IPv4 and IPv6, so one capability flag covers both.
         (LinkKind::Wireguard, _) if !status.wireguard => Err(format!("no_wireguard:{server}")),
+        // `sit` has one module and runs over IPv4 only (its own addresses are the IPv6 ones).
+        (LinkKind::Sit, _) if !status.sit => Err(format!("no_sit:{server}")),
         _ => Ok(()),
     }
 }

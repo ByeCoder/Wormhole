@@ -10,7 +10,7 @@
 //! first, the programs that run (`ip`, `ping`) get fixed arguments with the checked values,
 //! and only interfaces whose names start with `kz-` are ever touched.
 
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{IpAddr, Ipv6Addr};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -46,6 +46,30 @@ pub const GENEVE_MTU: u32 = 1450;
 /// WireGuard adds 60 (outer IPv4 20, UDP 8, and the 32-byte WireGuard data header).
 pub const WG_MTU: u32 = 1440;
 
+/// 6in4 (`sit`) adds the 20-byte outer IPv4 header; the inner is IPv6. The underlay is
+/// always IPv4, so there is no IPv6-underlay variant.
+pub const SIT_MTU: u32 = 1480;
+
+/// The prefix length of a `sit` link's own IPv6 subnet: the two ends are a /126 (the IPv6
+/// equivalent of the /30 the IPv4 kinds use).
+pub const SIT_PREFIX: u8 = 126;
+
+/// The IPv6 address a `sit` link's own end takes, derived from the IPv4 host it would have
+/// had on an ordinary /30: the host embedded in a ULA prefix (`fd6a:4::/96`), so the two
+/// ends of one link land in the same /126 and no two links of a network collide.
+pub fn sit_inner(host: u32) -> Ipv6Addr {
+    Ipv6Addr::new(
+        0xfd6a,
+        0x0004,
+        0,
+        0,
+        0,
+        0,
+        (host >> 16) as u16,
+        (host & 0xffff) as u16,
+    )
+}
+
 /// An IPv6 header is 20 bytes larger than an IPv4 one. (`ip6gre` is made without the
 /// 8-byte encapsulation limit option, which many networks drop.)
 pub const IPV6_EXTRA: u32 = 20;
@@ -61,6 +85,7 @@ pub fn overhead(kind: LinkKind, v6: bool) -> u32 {
         LinkKind::Ipip => PATH_MTU - IPIP_MTU,
         LinkKind::Geneve => PATH_MTU - GENEVE_MTU,
         LinkKind::Wireguard => PATH_MTU - WG_MTU,
+        LinkKind::Sit => PATH_MTU - SIT_MTU,
     };
     if v6 {
         v4 + IPV6_EXTRA
@@ -127,8 +152,9 @@ pub fn is_v6(spec: &NetSpec) -> bool {
 }
 
 /// Checks every field of a link request; the parsed addresses come back: the two public
-/// ones (both IPv4, or both IPv6) and the link's own two.
-pub fn validate(spec: &NetSpec) -> Result<(IpAddr, IpAddr, Ipv4Addr, Ipv4Addr)> {
+/// ones (both IPv4, or both IPv6) and the link's own two. The link's own addresses are IPv4
+/// for every kind except `sit` (6in4), whose own addresses are IPv6 over an IPv4 underlay.
+pub fn validate(spec: &NetSpec) -> Result<(IpAddr, IpAddr, IpAddr, IpAddr)> {
     if !valid_ifname(&spec.name) {
         bail!("the interface name must be kz- and up to eight small letters or digits");
     }
@@ -137,10 +163,10 @@ pub fn validate(spec: &NetSpec) -> Result<(IpAddr, IpAddr, Ipv4Addr, Ipv4Addr)> 
             .ok()
             .with_context(|| format!("{what} is not an IP address"))
     };
-    let private = |s: &str, what: &str| -> Result<Ipv4Addr> {
-        s.parse::<Ipv4Addr>()
+    let private = |s: &str, what: &str| -> Result<IpAddr> {
+        s.parse::<IpAddr>()
             .ok()
-            .with_context(|| format!("{what} is not an IPv4 address"))
+            .with_context(|| format!("{what} is not an IP address"))
     };
     let local = public(&spec.local, "local")?;
     let remote = public(&spec.remote, "remote")?;
@@ -157,8 +183,31 @@ pub fn validate(spec: &NetSpec) -> Result<(IpAddr, IpAddr, Ipv4Addr, Ipv4Addr)> 
     if local == remote {
         bail!("local and remote are the same address");
     }
-    if !(30..=31).contains(&spec.prefix) {
-        bail!("prefix must be 30 or 31");
+    // `sit` carries IPv6 inside an IPv4 packet: its own addresses are IPv6 (a /126), its
+    // underlay IPv4. Every other kind has IPv4 own addresses (a /30 or /31).
+    let want_inner_v6 = spec.kind.inner_v6();
+    for (a, what) in [(address, "address"), (peer, "peer")] {
+        if a.is_ipv6() != want_inner_v6 {
+            bail!(
+                "{what} must be an IPv{} address",
+                if want_inner_v6 { 6 } else { 4 }
+            );
+        }
+    }
+    let prefix_ok = if want_inner_v6 {
+        (64..=127).contains(&spec.prefix)
+    } else {
+        (30..=31).contains(&spec.prefix)
+    };
+    if !prefix_ok {
+        bail!(
+            "prefix must be {}",
+            if want_inner_v6 {
+                "64 to 127"
+            } else {
+                "30 or 31"
+            }
+        );
     }
     match spec.kind {
         LinkKind::Gre => {
@@ -207,6 +256,17 @@ pub fn validate(spec: &NetSpec) -> Result<(IpAddr, IpAddr, Ipv4Addr, Ipv4Addr)> 
                 bail!("the WireGuard peer public key is missing or malformed");
             }
         }
+        LinkKind::Sit => {
+            if !local.is_ipv4() {
+                bail!("a sit (6in4) link runs over IPv4; its own addresses are the IPv6 ones");
+            }
+            if spec.key != 0 {
+                bail!("a sit link has no key");
+            }
+            if spec.port != 0 {
+                bail!("a sit link has no port");
+            }
+        }
     }
     let v6 = local.is_ipv6();
     let most = max_mtu(spec.kind, v6);
@@ -219,8 +279,16 @@ pub fn validate(spec: &NetSpec) -> Result<(IpAddr, IpAddr, Ipv4Addr, Ipv4Addr)> 
     if !(MIN_MTU..=most).contains(&spec.mtu) {
         bail!("mtu must be between {MIN_MTU} and {most}");
     }
-    let mask = u32::MAX << (32 - u32::from(spec.prefix));
-    if u32::from(address) & mask != u32::from(peer) & mask || address == peer {
+    // Two different hosts of one subnet, for IPv4 (/30 or /31) or IPv6 (a /126 for sit).
+    let bits = |a: IpAddr| -> u128 {
+        match a {
+            IpAddr::V4(x) => u128::from(u32::from(x)),
+            IpAddr::V6(x) => u128::from(x),
+        }
+    };
+    let width: u32 = if address.is_ipv6() { 128 } else { 32 };
+    let host_bits = width - u32::from(spec.prefix);
+    if bits(address) >> host_bits != bits(peer) >> host_bits || address == peer {
         bail!(
             "address and peer must be two different hosts of one /{}",
             spec.prefix
@@ -337,6 +405,21 @@ pub fn commands(spec: &NetSpec) -> Result<Vec<Vec<String>>> {
             spec.name.clone(),
             s("type"),
             s("wireguard"),
+        ],
+        // 6in4: IPv6 inside IPv4 (IP protocol 41). The underlay is IPv4 (validate rejects an
+        // IPv6 one), and the `addr add` below gives it the IPv6 /126.
+        (LinkKind::Sit, _) => vec![
+            s("link"),
+            s("add"),
+            spec.name.clone(),
+            s("type"),
+            s("sit"),
+            s("local"),
+            local.to_string(),
+            s("remote"),
+            remote.to_string(),
+            s("ttl"),
+            s("64"),
         ],
         // Like VXLAN, one peer, the IETF-standard header. The same over IPv6.
         (LinkKind::Geneve, _) => vec![
@@ -954,6 +1037,26 @@ impl Net {
                 Err(e) => (false, Some(format!("the wg tool is missing ({e:#})"))),
             }
         };
+        // 6in4 (`sit`) needs the `sit` module and an IPv4 underlay. The probe makes a sit
+        // netdev between documentation IPv4 addresses.
+        let (sit, sit_reason) = self
+            .probe(
+                "kz-probes",
+                &[
+                    "link",
+                    "add",
+                    "kz-probes",
+                    "type",
+                    "sit",
+                    "local",
+                    "192.0.2.1",
+                    "remote",
+                    "192.0.2.2",
+                    "ttl",
+                    "64",
+                ],
+            )
+            .await;
         let links = self
             .load()
             .link
@@ -991,6 +1094,8 @@ impl Net {
             geneve6_reason,
             wireguard,
             wireguard_reason,
+            sit,
+            sit_reason,
             links,
         }
     }
@@ -1232,6 +1337,56 @@ mod tests {
             .unwrap()
             .join(" ")
             .contains("endpoint [2001:db8::2]:51820"));
+    }
+
+    fn sit() -> NetSpec {
+        // Two IPv6 ends derived from an IPv4 /30's two hosts, as the panel does.
+        NetSpec {
+            key: 0,
+            port: 0,
+            address: sit_inner(0x0A4D_0001).to_string(),
+            peer: sit_inner(0x0A4D_0002).to_string(),
+            prefix: SIT_PREFIX,
+            mtu: SIT_MTU,
+            kind: LinkKind::Sit,
+            ..spec()
+        }
+    }
+
+    #[test]
+    fn a_sit_link_is_6in4_with_an_ipv6_inner_address() {
+        let lines: Vec<String> = commands(&sit())
+            .unwrap()
+            .iter()
+            .map(|c| c.join(" "))
+            .collect();
+        assert_eq!(
+            lines,
+            vec![
+                "link add kz-a1b2c type sit local 203.0.113.5 remote 198.51.100.7 ttl 64",
+                "addr add fd6a:4::a4d:1/126 dev kz-a1b2c",
+                "link set kz-a1b2c mtu 1480 up",
+            ]
+        );
+        // The two ends are two hosts of one /126.
+        assert_eq!(sit_inner(0x0A4D_0001).to_string(), "fd6a:4::a4d:1");
+        assert_eq!(overhead(LinkKind::Sit, false), 20);
+        // The underlay must be IPv4, the inner IPv6, with no key or port.
+        assert!(commands(&NetSpec {
+            local: "2001:db8::1".into(),
+            remote: "2001:db8::2".into(),
+            ..sit()
+        })
+        .is_err());
+        assert!(commands(&NetSpec {
+            address: "10.0.0.1".into(),
+            peer: "10.0.0.2".into(),
+            prefix: 30,
+            ..sit()
+        })
+        .is_err());
+        assert!(commands(&NetSpec { key: 1, ..sit() }).is_err());
+        assert!(commands(&NetSpec { port: 1, ..sit() }).is_err());
     }
 
     #[test]

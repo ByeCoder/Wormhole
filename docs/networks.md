@@ -1,4 +1,4 @@
-# Private networks (GRE, VXLAN, IPIP, Geneve and WireGuard)
+# Private networks (GRE, VXLAN, IPIP, Geneve, WireGuard and 6in4)
 
 The panel can join your servers into a **private network**: each pair gets a GRE or VXLAN link with
 private addresses (`10.77.0.1`, `10.77.0.2`, ...) that the panel hands out so that **no two are
@@ -109,6 +109,22 @@ anything and names the server that cannot.
 both servers, makes the link again the other way on both, and pings across it. If nothing
 passes it puts the link back as it was. The link keeps its private addresses, so the tunnels over
 it need nothing; they lose their connections for a moment.
+
+## 6in4 (sit)
+
+The one link whose **own addresses are IPv6**. `sit` carries IPv6 inside an IPv4 packet (IP
+protocol 41), so the two servers get a private **IPv6** link over an ordinary IPv4 path. Needs
+Wormhole **1.2.0** on both servers and the `sit` kernel module.
+
+- **On the wire:** IPv4 (protocol 41), 20 bytes per packet (MTU 1480). The underlay is always
+  IPv4 — there is no IPv6-underlay variant (that would just be native IPv6).
+- **Its own addresses are IPv6.** The panel still reserves an IPv4 `/30` from the pool for each
+  link (so links never collide and the bookkeeping is the same), but the addresses it puts on the
+  interface are an IPv6 `/126` derived from it, under a ULA prefix (`fd6a:4::/96`). So a tunnel or
+  a server that joins over a `sit` network reaches the other end at its IPv6 address.
+- **Use it** when you want a private IPv6 link between two servers whose path is IPv4, for example
+  to run IPv6-only services or tunnels across an IPv4-only network. Where protocol 41 is blocked,
+  GRE or VXLAN (which carry IPv4) are the alternatives.
 
 ## MTU
 

@@ -16,7 +16,7 @@ use serde::Serialize;
 use crate::auth::now;
 use crate::config::random_hex;
 use crate::db::Db;
-use crate::net::{GENEVE_PORT, VNI_MAX, VXLAN_PORT, WG_PORT};
+use crate::net::{sit_inner, GENEVE_PORT, VNI_MAX, VXLAN_PORT, WG_PORT};
 use crate::wire::LinkKind;
 
 /// An IPv4 network: the address of its first host bit pattern, and how many bits are fixed.
@@ -251,6 +251,8 @@ impl Networks {
             LinkKind::Geneve => port,
             LinkKind::Wireguard if port == 0 => WG_PORT,
             LinkKind::Wireguard => port,
+            LinkKind::Sit if port != 0 => bail!("bad_port"),
+            LinkKind::Sit => 0,
         };
         let pool = Cidr::parse(cidr)?;
         check_pool(pool)?;
@@ -386,8 +388,13 @@ impl Networks {
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )
             .map_err(|_| anyhow!("no_such_network"))?;
-        let ipv6 = ipv6.unwrap_or(net_v6);
         let kind = kind_of(&kind);
+        // `sit` runs over IPv4 (its own addresses are the IPv6 ones); it has no IPv6 underlay.
+        let ipv6 = if kind == LinkKind::Sit {
+            false
+        } else {
+            ipv6.unwrap_or(net_v6)
+        };
         let pool = Cidr::parse(&cidr)?;
         let mut used: HashSet<u32> = {
             let mut stmt = tx.prepare("SELECT subnet FROM net_links WHERE network = ?1")?;
@@ -439,7 +446,7 @@ impl Networks {
                 let sql = match kind {
                     // IPIP and WireGuard carry no VNI; a per-pair key keeps the schema's
                     // (a, b, gre_key) unique, and the agent is sent 0 (see `spec_for`).
-                    LinkKind::Gre | LinkKind::Ipip | LinkKind::Wireguard => {
+                    LinkKind::Gre | LinkKind::Ipip | LinkKind::Wireguard | LinkKind::Sit => {
                         "SELECT gre_key FROM net_links WHERE a = ?1 AND b = ?2"
                     }
                     LinkKind::Vxlan | LinkKind::Geneve => {
@@ -487,8 +494,16 @@ impl Networks {
                     prefix: 30,
                 }
                 .to_string(),
-                addr_a: Ipv4Addr::from(subnet + 1).to_string(),
-                addr_b: Ipv4Addr::from(subnet + 2).to_string(),
+                addr_a: if kind == LinkKind::Sit {
+                    sit_inner(subnet + 1).to_string()
+                } else {
+                    Ipv4Addr::from(subnet + 1).to_string()
+                },
+                addr_b: if kind == LinkKind::Sit {
+                    sit_inner(subnet + 2).to_string()
+                } else {
+                    Ipv4Addr::from(subnet + 2).to_string()
+                },
                 gre_key,
                 created: now(),
                 kind,

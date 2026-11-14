@@ -62,6 +62,11 @@ Private networks:
   default), 60 bytes per packet, over IPv4 or IPv6; needs the `wireguard` module and the `wg`
   tool. Offered in *Add server* alongside GRE/VXLAN/IPIP/Geneve. Guide:
   [Private networks](docs/networks.md#wireguard).
+- **6in4 (`sit`)** private networks — the one link kind whose own addresses are **IPv6**. It
+  carries IPv6 inside an IPv4 packet (IP protocol 41, 20 bytes), so two servers get a private
+  IPv6 link over an IPv4 path. The panel still reserves an IPv4 `/30` per link for bookkeeping but
+  puts an IPv6 `/126` (a ULA derived from it) on the interface. Needs the `sit` module. Guide:
+  [Private networks](docs/networks.md#6in4-sit).
 
 ## 1.1.0 - 2026-11-13
 

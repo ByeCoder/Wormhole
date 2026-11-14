@@ -93,6 +93,7 @@ export function NewGreLinkFields({
               ["ipip", "IPIP"],
               ["geneve", "Geneve"],
               ["wireguard", "WireGuard"],
+              ["sit", "6in4"],
             ]}
             onChange={onKind}
           />

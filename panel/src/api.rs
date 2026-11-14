@@ -2030,6 +2030,7 @@ async fn network_create(
                 LinkKind::Ipip => "IPIP".to_owned(),
                 LinkKind::Geneve => format!("Geneve, UDP {}", n.port),
                 LinkKind::Wireguard => format!("WireGuard, UDP {}", n.port),
+                LinkKind::Sit => "6in4 (sit)".to_owned(),
             };
             audit(
                 &state,
