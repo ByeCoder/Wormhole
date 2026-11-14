@@ -273,10 +273,17 @@ html:not(.js) .hero { height: 100vh; }
   .side { position: fixed; inset-block: 60px 0; inset-inline-start: 0; width: min(320px, 88vw); max-height: none; background: var(--bg); border-inline-end: 1px solid var(--line-strong); padding: var(--sp-4); z-index: 40; transform: translateX(-105%); transition: transform var(--dur-mid) var(--ease-out); box-shadow: var(--shadow-deep); visibility: hidden; }
   [dir="rtl"] .side { transform: translateX(105%); }
   .side.open { transform: none; visibility: visible; }
+  /* Closed, the drawer is off-canvas; taking it out of flow keeps its box from adding a
+     sideways scroll on a phone (a fixed box still counts toward the page width). */
+  .side:not(.open) { display: none; }
   .panelshot { grid-template-columns: 1fr; }
   .frame iframe { height: 440px; }
   .hero { height: 300vh; }
   .brand small { display: none; }
+}
+
+@media (max-width: 460px) {
+  .brand span { display: none; }
 }
 
 /* ---- Low power and reduced motion: nothing moves ---- */
