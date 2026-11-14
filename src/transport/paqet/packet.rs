@@ -81,6 +81,7 @@ pub fn build_tcp_segment(
 /// header is ours, so both the IPv4 header checksum and the TCP checksum are computed
 /// here. The builder and both checksums are verified against reference values in the
 /// tests.
+#[allow(clippy::too_many_arguments)]
 pub fn build_spoofed_ipv4_tcp(
     source_ip: Ipv4Addr,
     source_port: u16,

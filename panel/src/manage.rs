@@ -204,6 +204,11 @@ pub fn render(spec: &Spec, token: &str, cert_files: Option<(&Path, &Path)>) -> R
         }
         tunnel.insert("tls".into(), Value::Table(tls));
     }
+    if let Some(handshake) = &spec.shadowtls_handshake {
+        let mut st = Table::new();
+        st.insert("handshake".into(), text(handshake));
+        tunnel.insert("shadowtls".into(), Value::Table(st));
+    }
     root.insert("tunnel".into(), Value::Table(tunnel));
     let mut tuning = Table::new();
     if let Some(limit) = spec.max_conns_per_ip.filter(|v| *v > 0) {
@@ -374,16 +379,19 @@ pub fn wanted_ports(spec: &Spec) -> Vec<(&'static str, u16)> {
         // Paqet listens on a raw TCP port: the kernel's TCP stack (with scoped RST
         // suppression) sees the port, so a TCP conflict must be reported like any other.
         // Such a raw listener does not appear in `/proc/net/tcp`; the tunnel's own port is
-        // excluded by `check` below, from the spec it is replacing.
-        let udp = matches!(spec.transport.as_str(), "quic" | "kcp");
-        if let Some(p) = spec.listen.as_deref().and_then(port) {
-            out.push((if udp { "udp" } else { "tcp" }, p));
-            // Auto listens for all of its transports: UDP on the port too, and a
-            // WebSocket on the next one.
-            if spec.transport == "auto" {
-                out.push(("udp", p));
-                if let Some(next) = p.checked_add(1) {
-                    out.push(("tcp", next));
+        // excluded by `check` below, from the spec it is replacing. icmp has no kernel
+        // port at all (its "port" is an ICMP identifier), so it reserves nothing.
+        let udp = matches!(spec.transport.as_str(), "quic" | "kcp" | "dns");
+        if spec.transport != "icmp" {
+            if let Some(p) = spec.listen.as_deref().and_then(port) {
+                out.push((if udp { "udp" } else { "tcp" }, p));
+                // Auto listens for all of its transports: UDP on the port too, and a
+                // WebSocket on the next one.
+                if spec.transport == "auto" {
+                    out.push(("udp", p));
+                    if let Some(next) = p.checked_add(1) {
+                        out.push(("tcp", next));
+                    }
                 }
             }
         }
@@ -616,6 +624,7 @@ pub fn get(dir: &Path, name: &str) -> Result<Spec> {
         kcp,
         spoof,
         tls_sni: c.tunnel.tls.as_ref().and_then(|t| t.sni.clone()),
+        shadowtls_handshake: c.tunnel.shadowtls.as_ref().map(|s| s.handshake.clone()),
         tls_cert: c
             .tunnel
             .tls

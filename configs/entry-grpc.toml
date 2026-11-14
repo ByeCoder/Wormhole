@@ -1,0 +1,23 @@
+# Entry side (Iran), reverse mode over grpc: the tunnel carried as a bidirectional gRPC
+# call over HTTP/2, to pass through CDNs and reverse proxies that speak gRPC. Pair:
+# exit-grpc.toml.
+#
+# This phase speaks cleartext HTTP/2 (h2c), so put it behind a CDN or reverse proxy that
+# terminates TLS and forwards gRPC/HTTP-2 to this port (the usual way to run gRPC behind
+# Cloudflare, nginx or Caddy). A stream transport like tcp/ws: the handshake, encryption
+# and mux run on top.
+role = "entry"
+mode = "reverse"
+profile = "balanced"
+
+[tunnel]
+transport = "grpc"
+listen = "0.0.0.0:2096"            # the HTTP/2 port the CDN/proxy forwards gRPC to
+token = "CHANGE-ME-run-wormhole-token"
+
+[[forward]]
+listen = "0.0.0.0:443"
+target = "127.0.0.1:443"
+
+[log]
+level = "info"

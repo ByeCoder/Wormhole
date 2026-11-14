@@ -226,6 +226,13 @@ const MIGRATIONS: &[&str] = &[
          label TEXT NOT NULL DEFAULT '',
          position INTEGER
      );",
+    // WireGuard links keep each end's key pair (base64), made by the panel when the link is
+    // created. The private keys never leave the panel except to the agent that owns the end.
+    // Empty for every other link kind.
+    "ALTER TABLE net_links ADD COLUMN wg_priv_a TEXT NOT NULL DEFAULT '';
+     ALTER TABLE net_links ADD COLUMN wg_pub_a TEXT NOT NULL DEFAULT '';
+     ALTER TABLE net_links ADD COLUMN wg_priv_b TEXT NOT NULL DEFAULT '';
+     ALTER TABLE net_links ADD COLUMN wg_pub_b TEXT NOT NULL DEFAULT '';",
 ];
 
 /// A shared handle to the database. SQLite calls are short, so one connection behind a

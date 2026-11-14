@@ -102,9 +102,9 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
   // only and never over a private network: every IPv4 address.
   const [netId, setNetId] = useState("");
   const [spoof, setSpoof] = useState(emptySpoof());
-  // Spoof rides the same raw IPv4 carrier as paqet: IPv4 only, listen on every address,
-  // never over a private network.
-  const paqet = transport === "paqet" || transport === "spoof";
+  // Spoof and icmp ride a raw IPv4 carrier like paqet: IPv4 only, listen on every
+  // address, never over a private network.
+  const paqet = transport === "paqet" || transport === "spoof" || transport === "icmp";
   const spoofOn = transport === "spoof";
   const listenHost = !paqet && isV6(dialHost) ? "[::]" : "0.0.0.0";
   const { networks, links } = useNetworks();
@@ -112,6 +112,7 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
   const [wsMode, setWsMode] = useState<WsMode>("websocket");
   const [wsHost, setWsHost] = useState("");
   const [sni, setSni] = useState("");
+  const [stHandshake, setStHandshake] = useState("");
   const [mux, setMux] = useState(emptyMux());
   const [kcp, setKcp] = useState(emptyKcp());
   const [tls, setTls] = useState(emptyTls());
@@ -180,7 +181,7 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
   const greLink = netId ? linkBetween(links, netId, entry, exit) : undefined;
   // The tunnel listens on the private address of the server that accepts it, in either mode.
   const greAddr = greLink ? (greLink.a === acceptor ? greLink.addr_a : greLink.addr_b) : "";
-  const udp = transport === "quic" || transport === "kcp";
+  const udp = transport === "quic" || transport === "kcp" || transport === "dns";
   const isWs = transport === "ws" || transport === "wss";
 
   // The accepting server's address, as the other one reaches it. A new tunnel starts from
@@ -230,6 +231,7 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
     // A server name typed for a self-signed certificate is not sent with a real one: the
     // other side checks a real one against the name it was issued for (tls_host).
     tls_sni: transport === "wss" && tls.mode === "self" && sni.trim() ? sni.trim() : undefined,
+    shadowtls_handshake: transport === "shadowtls" && stHandshake.trim() ? stHandshake.trim() : undefined,
     mux: muxSpecOf(mux, transport, muxOn),
     kcp: kcpSpecOf(kcp, transport, profile),
     spoof: spoofOn ? spoofToPair(spoof).spoof : undefined,
@@ -490,7 +492,7 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
               <>
                 <h3 className="wz-q">{t("wz.q3")}</h3>
                 <p className="wz-lead">{t("wz.lead3", { acceptor: serverName(acceptor), dialer: serverName(dialer) })}</p>
-                <GreChoice value={netId} onChange={setNetId} networks={networks} links={links} entry={entry} exit={exit} acceptor={acceptor} port={listenPort} serverName={serverName} blocked={paqet ? t("paqet.noNetwork") : undefined} />
+                <GreChoice value={netId} onChange={setNetId} networks={networks} links={links} entry={entry} exit={exit} acceptor={acceptor} port={listenPort} serverName={serverName} blocked={paqet ? (transport === "icmp" ? t("icmp.noNetwork") : t("paqet.noNetwork")) : undefined} />
                 <div className="grid-2 wz-grid">
                   <div className="field">
                     <label htmlFor="wz-port">{t("wz.port", { server: serverName(acceptor) })}</label>
@@ -525,7 +527,7 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
                       }}
                     />
                     <span className="help">{t("wz.dialHelp")}</span>
-                    {paqet && <span className="help">{t("paqet.ipv4Only")}</span>}
+                    {paqet && <span className="help">{transport === "icmp" ? t("icmp.ipv4Only") : t("paqet.ipv4Only")}</span>}
                     {(paqet ? ipv4Choices : addrChoices).length > 0 && (
                       <span className="addr-chips" aria-label={t("wz.dialSeen", { server: serverName(acceptor) })}>
                         {(paqet ? ipv4Choices : addrChoices).map((a) => (
@@ -559,8 +561,8 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
                     }}
                   />
                 )}
-                {(isWs || (transport === "tcp" && !muxOn)) && (
-                  <More title={t("more.title")} note={whereNote} show={(step === 2 && !!error && isWs) || !!sni}>
+                {(isWs || (transport === "tcp" && !muxOn) || transport === "shadowtls") && (
+                  <More title={t("more.title")} note={whereNote} show={(step === 2 && !!error && isWs) || !!sni || transport === "shadowtls"}>
                     <div className="grid-2 wz-grid">
                       {isWs && (
                         <div className="field">
@@ -580,6 +582,13 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
                           <label htmlFor="wz-sni">{t("wz.sni")}</label>
                           <input className="text mono" id="wz-sni" dir="ltr" value={sni} placeholder="www.example.com" onChange={(e) => setSni(e.target.value.trim())} />
                           <span className="help">{t("wz.sniHelp")}</span>
+                        </div>
+                      )}
+                      {transport === "shadowtls" && (
+                        <div className="field">
+                          <label htmlFor="wz-sths">{t("wz.shadowtls.handshake")}</label>
+                          <input className="text mono" id="wz-sths" dir="ltr" value={stHandshake} placeholder="www.microsoft.com:443" onChange={(e) => setStHandshake(e.target.value.trim())} />
+                          <span className="help">{t("wz.shadowtls.handshakeHelp")}</span>
                         </div>
                       )}
                       {transport === "tcp" && !muxOn && (

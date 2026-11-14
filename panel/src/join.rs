@@ -175,6 +175,8 @@ mod tests {
             mtu: 1476,
             kind: Default::default(),
             port: 0,
+            wg_private: String::new(),
+            wg_peer: String::new(),
         }
     }
 

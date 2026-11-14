@@ -417,7 +417,7 @@ impl Pending {
 
 /// How a [`Dialer`] connects.
 enum Dialing {
-    Stream(TransportDialer),
+    Stream(Box<TransportDialer>),
     #[cfg(feature = "quic")]
     Quic(Box<QuicDialer>),
 }
@@ -446,18 +446,18 @@ impl Dialer {
         #[cfg(feature = "quic")]
         let dialing = match &common.quic {
             Some(settings) => Dialing::Quic(Box::new(QuicDialer::new(addr, None, settings)?)),
-            None => Dialing::Stream(TransportDialer::new(
+            None => Dialing::Stream(Box::new(TransportDialer::new(
                 &common.settings,
                 addr,
                 &common.tuning,
-            )?),
+            )?)),
         };
         #[cfg(not(feature = "quic"))]
-        let dialing = Dialing::Stream(TransportDialer::new(
+        let dialing = Dialing::Stream(Box::new(TransportDialer::new(
             &common.settings,
             addr,
             &common.tuning,
-        )?);
+        )?));
         Ok(Self { dialing, common })
     }
 

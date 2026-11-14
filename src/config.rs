@@ -84,6 +84,23 @@ pub enum TransportKind {
     /// address is forged, for a Layer-3 whitelist firewall. Needs a network that permits
     /// source spoofing. Linux and IPv4 only. See `[tunnel.spoof]`.
     Spoof,
+    /// KCP packets in the payload of ICMP echo messages over a Linux IPv4 raw socket,
+    /// encrypted with an `icmp`-specific key from the token. Firewall rules added by
+    /// itself. Linux and IPv4 only.
+    Icmp,
+    /// KCP packets wrapped in DNS query/response messages over UDP (port 53 on the
+    /// listening side), encrypted with a `dns`-specific key from the token. For paths that
+    /// pass only DNS. Works over IPv4 and IPv6.
+    Dns,
+    /// A tunnel stream carried as a bidirectional gRPC call over HTTP/2, to pass through
+    /// CDNs and reverse proxies that speak gRPC. A stream transport, like `tcp` and `ws`.
+    Grpc,
+    /// The tunnel streamed over an ordinary HTTP/1.1 request and response with chunked
+    /// bodies (like XHTTP in Xray). A stream transport, like `tcp` and `ws`.
+    Xhttp,
+    /// The tunnel inside a TLS connection made to look like traffic to a real site, in the
+    /// spirit of ShadowTLS/REALITY (the rustls-achievable form). A stream transport.
+    Shadowtls,
 }
 
 impl TransportKind {
@@ -98,6 +115,11 @@ impl TransportKind {
             Self::Paqet => "paqet",
             Self::Auto => "auto",
             Self::Spoof => "spoof",
+            Self::Icmp => "icmp",
+            Self::Dns => "dns",
+            Self::Grpc => "grpc",
+            Self::Xhttp => "xhttp",
+            Self::Shadowtls => "shadowtls",
         }
     }
 
@@ -211,6 +233,8 @@ pub struct TunnelConfig {
     pub kcp: Option<KcpConfig>,
     /// Only for `spoof`: the forged source and the peer's forged source address.
     pub spoof: Option<SpoofConfig>,
+    /// Only for `shadowtls`: the real site to borrow a TLS appearance from.
+    pub shadowtls: Option<ShadowtlsConfig>,
     /// The exit side answers speed test streams (`wormhole speedtest` on the entry side).
     /// They only produce, consume and echo data; they dial nothing.
     #[serde(default = "default_true")]
@@ -230,6 +254,19 @@ pub struct ControlConfig {
 /// `[tunnel.spoof]`: the forged addresses of a `spoof` tunnel. Only read for
 /// `transport = "spoof"`; the core refuses the table for any other transport. `spoof`
 /// reuses every `[tunnel.kcp]` setting of `paqet` for the KCP wire below the carrier.
+/// `[tunnel.shadowtls]`: the camouflage settings of the `shadowtls` transport. The listener
+/// relays unauthenticated connections (active probes) to `handshake`, a real TLS site, so a
+/// prober sees that site; the dialer names a subdomain of the same host as its TLS SNI, so
+/// the connection looks like traffic to it.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ShadowtlsConfig {
+    /// A real TLS site as `host:port` (443 if the port is left off), e.g.
+    /// `www.microsoft.com:443`. The listener relays probes here; the dialer uses `host` as
+    /// its SNI base.
+    pub handshake: String,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SpoofConfig {
@@ -970,6 +1007,17 @@ const KCP_MTU_FEC: usize = 1429;
 const PAQET_MTU: usize = 1430;
 /// With FEC, 43 bytes are added instead of 30: 1500 - 20 - 20 - 43 = 1417.
 const PAQET_MTU_FEC: usize = 1417;
+/// icmp adds an 8-byte ICMP echo header to the sealed packet and the kernel adds 20 bytes
+/// of IPv4 header: 1500 - 20 - 8 - 30 (sealed KCP packet) = 1442.
+const ICMP_MTU: usize = 1442;
+/// With FEC, 43 bytes are added instead of 30: 1500 - 20 - 8 - 43 = 1429.
+const ICMP_MTU_FEC: usize = 1429;
+/// dns wraps each sealed packet in a DNS message (about 68 bytes of header, question and
+/// record) over UDP. Capping the KCP mtu here keeps the whole message within a common
+/// EDNS0 buffer (1232 bytes): 1232 - 68 - 28 (seal) = 1136.
+const DNS_MTU: usize = 1136;
+/// With FEC, 43 bytes are added instead of 30: 1136 - 13 = 1123.
+const DNS_MTU_FEC: usize = 1123;
 const KCP_FEC_DATA: std::ops::RangeInclusive<usize> = 1..=64;
 const KCP_FEC_PARITY: std::ops::RangeInclusive<usize> = 1..=32;
 const MUX_MIN_LIFETIME_SECS: u64 = 60;
@@ -1077,7 +1125,12 @@ impl Config {
         }
         let unreliable = matches!(
             self.tunnel.transport,
-            TransportKind::Kcp | TransportKind::Paqet | TransportKind::Spoof | TransportKind::Quic
+            TransportKind::Kcp
+                | TransportKind::Paqet
+                | TransportKind::Spoof
+                | TransportKind::Icmp
+                | TransportKind::Dns
+                | TransportKind::Quic
         ) && self.mux().enabled;
         if self.forward.iter().any(|f| f.duplication().is_some()) && !unreliable {
             warnings.push(
@@ -1150,6 +1203,45 @@ impl Config {
                 bail!("transport = \"spoof\" is only supported on Linux");
             }
             self.validate_spoof()?;
+        }
+        if self.tunnel.transport == TransportKind::Icmp {
+            if !cfg!(feature = "kcp") {
+                bail!(
+                    "transport = \"icmp\" is not in this build (built without the `kcp` \
+                     cargo feature)"
+                );
+            }
+            if !cfg!(target_os = "linux") {
+                bail!("transport = \"icmp\" is only supported on Linux");
+            }
+            self.validate_paqet_addresses_named("icmp")?;
+        }
+        if self.tunnel.transport == TransportKind::Dns && !cfg!(feature = "kcp") {
+            bail!(
+                "transport = \"dns\" is not in this build (built without the `kcp` cargo \
+                 feature)"
+            );
+        }
+        if self.tunnel.transport == TransportKind::Grpc && !cfg!(feature = "grpc") {
+            bail!(
+                "transport = \"grpc\" is not in this build (built without the `grpc` cargo \
+                 feature)"
+            );
+        }
+        if self.tunnel.transport == TransportKind::Shadowtls {
+            if !cfg!(feature = "shadowtls") {
+                bail!(
+                    "transport = \"shadowtls\" is not in this build (built without the \
+                     `shadowtls` cargo feature)"
+                );
+            }
+            match self.tunnel.shadowtls.as_ref() {
+                None => bail!("transport = \"shadowtls\" needs a [tunnel.shadowtls] section"),
+                Some(s) if s.handshake.trim().is_empty() => {
+                    bail!("[tunnel.shadowtls] handshake must be a real site, e.g. www.microsoft.com:443")
+                }
+                Some(_) => {}
+            }
         }
         if self.tunnel.token.trim().len() < 16 {
             bail!(
@@ -1336,11 +1428,16 @@ impl Config {
         };
         if !matches!(
             self.tunnel.transport,
-            TransportKind::Kcp | TransportKind::Paqet | TransportKind::Auto | TransportKind::Spoof
+            TransportKind::Kcp
+                | TransportKind::Paqet
+                | TransportKind::Auto
+                | TransportKind::Spoof
+                | TransportKind::Icmp
+                | TransportKind::Dns
         ) {
             bail!(
-                "[tunnel.kcp] is only used with transport = \"kcp\", \"paqet\", \"spoof\" \
-                 or \"auto\""
+                "[tunnel.kcp] is only used with transport = \"kcp\", \"paqet\", \"spoof\", \
+                 \"icmp\", \"dns\" or \"auto\""
             );
         }
         let manual = [
@@ -1417,6 +1514,36 @@ impl Config {
                 );
             }
         }
+        if self.tunnel.transport == TransportKind::Icmp {
+            let effective = self.kcp();
+            let max = if effective.fec().is_some() {
+                ICMP_MTU_FEC
+            } else {
+                ICMP_MTU
+            };
+            if effective.mtu > max {
+                bail!(
+                    "tunnel.kcp.mtu must be at most {max} bytes with transport = \"icmp\" \
+                     (an 8-byte ICMP header and a 20-byte IPv4 header are added; with FEC the \
+                     packet is larger)"
+                );
+            }
+        }
+        if self.tunnel.transport == TransportKind::Dns {
+            let effective = self.kcp();
+            let max = if effective.fec().is_some() {
+                DNS_MTU_FEC
+            } else {
+                DNS_MTU
+            };
+            if effective.mtu > max {
+                bail!(
+                    "tunnel.kcp.mtu must be at most {max} bytes with transport = \"dns\" \
+                     (each packet is wrapped in a DNS message; this keeps it within a common \
+                     EDNS0 buffer)"
+                );
+            }
+        }
         Ok(())
     }
 
@@ -1425,6 +1552,12 @@ impl Config {
     /// `fec_parity`, or an MTU too large for FEC.
     pub fn kcp(&self) -> KcpConfig {
         let mut k = self.tunnel.kcp.clone().unwrap_or_default();
+        // dns wraps every packet in a DNS message, which must stay small; lower the
+        // default mtu to its cap when the user has not chosen one of their own (an explicit
+        // mtu over the cap is reported by validation instead).
+        if self.tunnel.transport == TransportKind::Dns && k.mtu == default_kcp_mtu() {
+            k.mtu = DNS_MTU;
+        }
         let unset = k.fec_data.is_none() && k.fec_parity.is_none();
         if self.profile == Profile::Gaming && unset && k.mtu <= KCP_MTU_FEC {
             (k.fec_data, k.fec_parity) = (Some(10), Some(3));

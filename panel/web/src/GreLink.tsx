@@ -90,10 +90,14 @@ export function NewGreLinkFields({
             options={[
               ["gre", "GRE"],
               ["vxlan", "VXLAN"],
+              ["ipip", "IPIP"],
+              ["geneve", "Geneve"],
+              ["wireguard", "WireGuard"],
+              ["sit", "6in4"],
             ]}
             onChange={onKind}
           />
-          <span className="help">{t(kind === "vxlan" ? "net.kind.vxlan" : "net.kind.gre")}</span>
+          <span className="help">{t(`net.kind.${kind}`)}</span>
         </div>
       )}
       <div className="field">
@@ -137,7 +141,7 @@ export function NewGreLinkFields({
             {t("add.gre.netOne", { name: network.name })} <code dir="ltr">{network.cidr}</code>
           </span>
         ) : (
-          <span className="help">{t(kind === "vxlan" ? "add.vx.netNew" : "add.gre.netNew")}</span>
+          <span className="help">{t(kind === "vxlan" || kind === "geneve" || kind === "wireguard" ? "add.vx.netNew" : "add.gre.netNew")}</span>
         )}
       </div>
     </>

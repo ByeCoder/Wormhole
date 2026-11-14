@@ -470,7 +470,7 @@ function Meter({ label, pct }: { label: string; pct: number | null }) {
  * How a new server joins: its agent dials the panel over the internet (the panel's public address) or over a
  * private GRE link the panel sets up for it, or the panel dials the agent (reverse).
  */
-type JoinWay = "internet" | "gre" | "vxlan" | "reverse";
+type JoinWay = "internet" | "gre" | "vxlan" | "ipip" | "geneve" | "reverse";
 
 /** The port a reverse agent listens on, until another is typed. */
 const REVERSE_PORT = "29001";
@@ -496,8 +496,8 @@ function AddServer({ servers, agentsOn, onClose }: { servers: ServerInfo[]; agen
   const [revGre, setRevGre] = useState(false);
   const [revKind, setRevKind] = useState<LinkKind>("gre");
   // Over a private link the panel makes (GRE or VXLAN), and its kind.
-  const overLink = way === "gre" || way === "vxlan";
-  const linkKind: LinkKind = way === "vxlan" ? "vxlan" : "gre";
+  const overLink = way === "gre" || way === "vxlan" || way === "ipip" || way === "geneve";
+  const linkKind: LinkKind = overLink ? (way as LinkKind) : "gre";
   const [busy, setBusy] = useState(false);
   const [own, setOwn] = useState<PanelAddresses | null>(null);
   const [code, setCode] = useState("");
@@ -633,7 +633,7 @@ function AddServer({ servers, agentsOn, onClose }: { servers: ServerInfo[]; agen
           <div className="field">
             <span className="label">{t("add.way")}</span>
             <div className="join-ways" role="group" aria-label={t("add.way")}>
-              {(["internet", "gre", "vxlan", "reverse"] as JoinWay[]).map((w) => (
+              {(["internet", "gre", "vxlan", "ipip", "geneve", "reverse"] as JoinWay[]).map((w) => (
                 <button
                   key={w}
                   type="button"
@@ -644,7 +644,7 @@ function AddServer({ servers, agentsOn, onClose }: { servers: ServerInfo[]; agen
                     setError("");
                   }}
                 >
-                  <Icon name={w === "gre" || w === "vxlan" ? "networks" : w === "reverse" ? "back" : "map"} size={18} />
+                  <Icon name={w === "gre" || w === "vxlan" || w === "ipip" || w === "geneve" ? "networks" : w === "reverse" ? "back" : "map"} size={18} />
                   <b>{t(`add.way.${w}`)}</b>
                   <span>{t(`add.way.${w}.d`)}</span>
                 </button>
@@ -768,7 +768,7 @@ function AddServer({ servers, agentsOn, onClose }: { servers: ServerInfo[]; agen
               <ol className="gre-steps">
                 <li>{t("add.gre.step1", { kind: kindLabel(linkKind) })}</li>
                 <li>{t("add.gre.step2")}</li>
-                <li>{t(linkKind === "vxlan" ? "add.vx.step3" : "add.gre.step3")}</li>
+                <li>{t(linkKind === "vxlan" || linkKind === "geneve" ? "add.vx.step3" : "add.gre.step3")}</li>
               </ol>
             </>
           )}

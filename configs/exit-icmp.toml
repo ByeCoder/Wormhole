@@ -1,0 +1,15 @@
+# Exit side (abroad), reverse mode over icmp. Pair: entry-icmp.toml.
+#
+# Needs root (or CAP_NET_RAW) and IPv4. `remote`'s port is the entry side's ICMP echo
+# identifier and must match its `listen` port.
+role = "exit"
+mode = "reverse"
+profile = "balanced"
+
+[tunnel]
+transport = "icmp"
+remote = "ENTRY_SERVER_IP:4000"
+token = "CHANGE-ME-run-wormhole-token"
+
+[log]
+level = "info"

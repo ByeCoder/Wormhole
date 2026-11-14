@@ -24,6 +24,10 @@ flowchart TD
 | `quic` | QUIC over UDP: streams and datagrams, TLS 1.3 | UDP flows without head-of-line blocking; paths where UDP works well |
 | `kcp` | KCP over UDP, every packet encrypted, optional FEC | lossy links where TCP collapses; games |
 | [`paqet`](paqet.md) | the same encrypted KCP, in raw TCP segments with no handshake (IPv4, Linux) | UDP is blocked or throttled but TCP gets through |
+| `icmp` | the same encrypted KCP, in the payload of ICMP echo (ping) packets (IPv4, Linux, root) | UDP and TCP are blocked but ping still gets through |
+| `dns` | the same encrypted KCP, wrapped in DNS query/response messages over UDP 53 | only DNS passes; a direct server-to-server link |
+| `grpc` | the tunnel as a bidirectional gRPC call over HTTP/2 (cleartext h2c in this phase) | behind a CDN or reverse proxy that speaks gRPC |
+| `xhttp` | the tunnel streamed over an HTTP/1.1 request/response with chunked bodies | only HTTP passes, or behind an HTTP CDN/proxy |
 
 Everything except `quic` runs the same layers on top: the handshake (mutual
 authentication with the token, X25519 for forward secrecy), AEAD records, and mux.
@@ -165,6 +169,158 @@ UDP but let TCP through.
 
 The whole guide, with examples and troubleshooting: [Paqet over raw TCP](paqet.md).
 
+## `icmp`
+
+`transport = "icmp"` carries the packets of `kcp` (sealed with the token, same presets, FEC
+and windows) inside the payload of **ICMP echo requests** — ordinary `ping` packets — over a
+raw socket. It is for the hardest routes, where both UDP and TCP are blocked or throttled but
+ICMP (ping) still passes.
+
+```toml
+[tunnel]
+transport = "icmp"
+listen = "0.0.0.0:4000"       # acceptor: the port is the ICMP echo identifier, not a TCP/UDP port
+# remote = "203.0.113.9:4000" # dialer: the peer's real address and its identifier
+```
+
+- **Nothing to set up.** The tunnel service opens the raw socket and adds scoped host
+  firewall rules of its own, and removes them when it stops. Both ends send echo *requests*,
+  so the only echo *replies* on the wire are the kernel's own answers; one firewall rule
+  drops those for the peer, which keeps the traffic from doubling without touching the
+  tunnel.
+- **The port is an ICMP identifier, not a real port.** ICMP has no ports, so Wormhole uses
+  the echo identifier (from `listen` / `remote`) to tell several tunnels — and the host's own
+  `ping` — apart. It reserves no TCP or UDP port.
+- **IPv4 only, needs root** (or `CAP_NET_RAW`), **and not over GRE or VXLAN**: inside a
+  private network a filter sees only the outer packets, so the disguise gains nothing. The
+  panel offers neither for `icmp`.
+- **The same settings as `kcp`:** the profile, `[tunnel.mux]` and `[tuning]`. (`[tunnel.kcp]`
+  custom tuning is a Paqet-only field in the panel; `icmp` uses the profile's KCP presets.)
+- **It needs a path that passes ICMP echo.** Where ping is dropped or rate-limited, use
+  `paqet` or `wss`.
+
+Both ends send echo requests (never replies), so there is no ping/pong pairing; the echo
+sequence and identifier fields carry the two ends' identifiers so replies find their way,
+and the two ends differ even on loopback. Needs 1.2.0 on both servers.
+
+## `dns`
+
+`transport = "dns"` carries the packets of `kcp` (sealed with the token) wrapped in **DNS
+query/response messages** over UDP. The dialing side sends queries, the listening side
+responses, so a filter that passes only DNS on UDP 53 lets the tunnel through.
+
+```toml
+[tunnel]
+transport = "dns"
+listen = "0.0.0.0:53"         # acceptor: UDP 53, where a DNS filter expects traffic (needs root)
+# remote = "203.0.113.9:53"   # dialer: the peer's address and DNS port
+```
+
+- **A direct server-to-server tunnel, not through a resolver.** Because the two servers
+  talk straight to each other, the sealed packet rides whole in a record's RDATA rather
+  than being squeezed into the query name (which a real recursive resolver would cap). It
+  looks like DNS to a filter on the path; it will not survive being forwarded through a
+  real DNS server.
+- **Port 53 needs root** (or `CAP_NET_BIND_SERVICE`) on the listening side, to bind the
+  privileged port. The dialing side needs nothing special.
+- **Works over IPv4 and IPv6**, and over a private network if you like (unlike the raw
+  transports).
+- **A small MTU.** Each packet is wrapped in a DNS message kept within a common EDNS0
+  buffer, so the KCP MTU is capped (about 1136 bytes); throughput is lower than the other
+  transports. DNS is a last-resort carrier.
+- **The same settings as `kcp`:** the profile, `[tunnel.mux]` and `[tuning]`.
+
+In the panel: pick *DNS* as the transport in the tunnel wizard and editor. Needs 1.2.0 on
+both servers.
+
+## `grpc`
+
+`transport = "grpc"` carries the tunnel as one **bidirectional gRPC call over HTTP/2**. The
+dialing side opens a `POST` to a gRPC-looking path with `content-type: application/grpc`,
+the listening side answers `200`, and the tunnel's bytes travel in gRPC length-prefixed
+messages. It is for getting through a CDN or reverse proxy that speaks gRPC/HTTP-2.
+
+```toml
+[tunnel]
+transport = "grpc"
+listen = "0.0.0.0:2096"       # acceptor: the HTTP/2 port the CDN/proxy forwards gRPC to
+# remote = "203.0.113.9:2096" # dialer: the peer's gRPC endpoint
+```
+
+- **Cleartext HTTP/2 in this phase.** The tunnel speaks h2c (HTTP/2 without TLS). To use a
+  CDN, put it **behind a CDN or reverse proxy that terminates TLS** and forwards gRPC to
+  this port — the usual way gRPC runs behind Cloudflare, nginx or Caddy. (Native TLS with
+  ALPN `h2`, so no front is needed, is a planned follow-up.)
+- **A stream transport**, like `tcp` and `ws`: the handshake, encryption and `[tunnel.mux]`
+  run on top. HTTP/2 is provided by the `h2` crate, behind the `grpc` cargo feature (on by
+  default).
+- **No root, IPv4 or IPv6.**
+
+In the panel: pick *gRPC* as the transport in the tunnel wizard and editor. Needs 1.2.0 on
+both servers.
+
+## `xhttp`
+
+`transport = "xhttp"` streams the tunnel over one **ordinary HTTP/1.1 request and
+response**, like XHTTP in Xray. The dialing side sends a `POST` whose chunked body is the
+upstream; the listening side answers `200` whose chunked body is the downstream; both
+bodies stay open for the life of the connection.
+
+```toml
+[tunnel]
+transport = "xhttp"
+listen = "0.0.0.0:8080"       # acceptor: the HTTP port the CDN/proxy forwards to
+# remote = "203.0.113.9:8080" # dialer: the peer's HTTP endpoint
+```
+
+- **Cleartext HTTP/1.1 in this phase.** Put it behind a CDN or reverse proxy that
+  terminates TLS and forwards HTTP, or use it where plain HTTP already passes. (Native TLS,
+  like `wss`, is a planned follow-up.)
+- **A stream transport**, like `tcp` and `ws`: the handshake, encryption and `[tunnel.mux]`
+  run on top, and the bytes travel in HTTP chunks. No new dependency — the HTTP is written
+  and parsed directly.
+- **No root, IPv4 or IPv6.** Needs a path that keeps a single HTTP response streaming
+  (full-duplex); a proxy that buffers whole responses will stall it.
+
+In the panel: pick *XHTTP* as the transport in the tunnel wizard and editor. Needs 1.2.0 on
+both servers.
+
+## `shadowtls`
+
+`transport = "shadowtls"` makes the tunnel port **look like an ordinary HTTPS mirror of a
+real website**. The listening side watches the incoming TLS ClientHello: a real Wormhole
+client proves itself by the server name (SNI) it sends, derived from the tunnel token; any
+other probe is relayed byte-for-byte to the genuine site, so an active prober sees that
+site's real certificate and handshake. The idea follows ShadowTLS v3.
+
+```toml
+[tunnel]
+transport = "shadowtls"
+listen = "0.0.0.0:443"        # acceptor: looks like an HTTPS site
+# remote = "203.0.113.9:443"  # dialer: the peer's endpoint
+
+[tunnel.shadowtls]
+handshake = "www.microsoft.com:443"   # the real site to imitate; same on both sides
+```
+
+- **Active-probe resistance by relay.** A client whose SNI does not carry a valid
+  token-keyed tag is not rejected (which would stand out) but transparently proxied to
+  `handshake`, so the port is indistinguishable from a reverse proxy in front of that site.
+- **The token is the secret.** The SNI a real client sends is `<nonce>.<base>` with a
+  keyed BLAKE3 tag over the nonce, verified on the listening side; a probe cannot forge it
+  without the token.
+- **A stream transport**, like `tcp` and `ws`: once the camouflage TLS is established the
+  handshake, encryption and `[tunnel.mux]` run on top. The outer TLS uses an ephemeral
+  self-signed certificate for real clients (they do not check it — the token already
+  authenticated the peer); probes get the real site's certificate via the relay.
+- **`handshake` must be a reachable HTTPS host as `host:port`** (a DNS name, not a bare IP,
+  since it is also used as the SNI). Both sides must set the same value.
+- **No root. IPv4 or IPv6.**
+
+This is a rustls-based camouflage, not a byte-exact clone of a specific proxy's wire
+format; it does not need your own certificate (unlike `wss`). In the panel: pick
+*ShadowTLS* as the transport and fill in the handshake site. Needs 1.2.0 on both servers.
+
 ## `wss` with a real certificate
 
 By default a listening `wss` side serves a self-signed certificate that the dialing side pins.
@@ -264,5 +420,7 @@ most providers' terms of service.
 ## Modes and transports
 
 Every transport works in both modes. The listening side needs its port reachable:
-TCP for `tcp`, `tcpmux`, `ws`, `wss` and `paqet`, UDP for `quic` and `kcp`. For `paqet`, Wormhole
-opens its own host firewall; a firewall in front of the server still has to let the TCP port through.
+TCP for `tcp`, `tcpmux`, `ws`, `wss`, `paqet`, `grpc` and `xhttp`, UDP for `quic`, `kcp` and `dns`,
+and ICMP echo for `icmp` (no port at all). For `paqet` and `icmp`, Wormhole opens its own
+host firewall; a firewall in front of the server still has to let the TCP port (or ICMP)
+through.

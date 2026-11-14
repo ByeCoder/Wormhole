@@ -68,7 +68,8 @@ test("the dialogs pass axe and keep the keyboard inside", async ({ page }) => {
   await page.locator(".join-way").nth(2).click();
   await expect(page.locator("#add-ip")).toBeVisible();
   await scan(page, "the add-server dialog, over VXLAN", ".dialog");
-  await page.locator(".join-way").nth(3).click();
+  // "the panel connects" (reverse) is the last way; it shows the remote host, not an IP.
+  await page.locator(".join-way").last().click();
   await expect(page.locator("#add-rhost")).toBeVisible();
   await scan(page, "the add-server dialog, the panel connects", ".dialog");
   await page.keyboard.press("Escape");

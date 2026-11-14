@@ -37,11 +37,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test
-      - name: Paqet over a real Linux raw socket
+      - name: Paqet and icmp over a real Linux raw socket
         run: |
           test_bin=$(cargo test --lib --no-run --message-format=json |
             jq -r 'select(.reason == "compiler-artifact" and .profile.test and .executable != null) | .executable')
           sudo env WORMHOLE_PAQET_IT=1 "$test_bin" paqet_round_trip_over_raw_ipv4
+          sudo env WORMHOLE_ICMP_IT=1 "$test_bin" icmp_round_trip_over_raw_ipv4
 
   test-panel:
     runs-on: ubuntu-latest

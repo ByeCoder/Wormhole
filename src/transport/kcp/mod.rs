@@ -60,6 +60,8 @@ const KEY_CONTEXT: &str = "wormhole 2026-10 kcp packets v1";
 const PAQET_KEY_CONTEXT: &str = "wormhole 2026-10 paqet packets v1";
 /// Spoof's packet key context: a spoof packet cannot be opened as a kcp or paqet one.
 const SPOOF_KEY_CONTEXT: &str = "wormhole 2026-11 spoof packets v1";
+const ICMP_KEY_CONTEXT: &str = "wormhole 2026-11 icmp packets v1";
+const DNS_KEY_CONTEXT: &str = "wormhole 2026-11 dns packets v1";
 
 /// Packet types, the first byte of a packet's plaintext.
 const PACKET_DATA: u8 = 0;
@@ -144,6 +146,8 @@ enum CarrierKind {
     Udp,
     Paqet,
     Spoof,
+    Icmp,
+    Dns,
 }
 
 impl fmt::Debug for KcpParams {
@@ -188,6 +192,28 @@ impl KcpParams {
             spoof,
         }
     }
+
+    /// `transport = "icmp"`: the same KCP settings and packet format, with a key of its
+    /// own and a raw IPv4 ICMP echo carrier below the packets.
+    pub fn new_icmp(tunnel: &TunnelConfig, config: KcpConfig) -> Self {
+        Self {
+            config,
+            key: Psk::new(&tunnel.token).subkey(ICMP_KEY_CONTEXT),
+            carrier: CarrierKind::Icmp,
+            spoof: None,
+        }
+    }
+
+    /// `transport = "dns"`: the same KCP settings and packet format, with a key of its own
+    /// and a UDP carrier that wraps each packet in a DNS query or response.
+    pub fn new_dns(tunnel: &TunnelConfig, config: KcpConfig) -> Self {
+        Self {
+            config,
+            key: Psk::new(&tunnel.token).subkey(DNS_KEY_CONTEXT),
+            carrier: CarrierKind::Dns,
+            spoof: None,
+        }
+    }
 }
 
 impl SpoofParams {
@@ -214,9 +240,9 @@ struct ConnSettings {
     dscp: Option<u8>,
     /// Whether streams offer their datagram side (`[tunnel.kcp] datagrams`).
     datagrams: bool,
-    /// The raw IPv4 TCP carrier instead of UDP (paqet or spoof): metering and IPv4-only
-    /// resolution key off this.
-    paqet: bool,
+    /// The carrier below KCP: UDP, the raw IPv4 TCP of paqet/spoof, or the raw IPv4 ICMP
+    /// of icmp. Carrier selection and IPv4-only resolution key off this.
+    carrier: CarrierKind,
     /// Set for `spoof`: the forged addresses the raw carrier sends and expects.
     spoof: Option<SpoofParams>,
     protection: Arc<Protection>,
@@ -235,11 +261,20 @@ impl ConnSettings {
             socket_buffer: tuning.udp.socket_buffer,
             dscp: tuning.dscp,
             datagrams: params.config.datagrams,
-            paqet: matches!(params.carrier, CarrierKind::Paqet | CarrierKind::Spoof),
+            carrier: params.carrier,
             spoof: params.spoof.clone(),
             protection: Arc::new(Protection::new(&params.key)),
             fec: params.config.fec(),
         }
+    }
+
+    /// Whether the carrier is a raw IPv4 one (paqet, spoof or icmp): resolution is then
+    /// IPv4-only. UDP-based carriers (udp, dns) work over IPv6 too.
+    fn ipv4_only(&self) -> bool {
+        matches!(
+            self.carrier,
+            CarrierKind::Paqet | CarrierKind::Spoof | CarrierKind::Icmp
+        )
     }
 }
 
@@ -1337,11 +1372,11 @@ impl KcpDialer {
 
     pub async fn dial(&self) -> io::Result<KcpStream> {
         let mut addresses = tokio::net::lookup_host(&self.remote).await?;
-        let peer = if self.settings.paqet {
+        let peer = if self.settings.ipv4_only() {
             addresses.find(|addr| addr.is_ipv4()).ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::Unsupported,
-                    "paqet supports IPv4 only in this phase",
+                    "this transport supports IPv4 only in this phase",
                 )
             })?
         } else {
@@ -1349,14 +1384,17 @@ impl KcpDialer {
                 .next()
                 .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "remote did not resolve"))?
         };
+        let (buffer, dscp) = (self.settings.socket_buffer, self.settings.dscp);
         let socket = if let Some(spoof) = self.settings.spoof.clone() {
-            let (buffer, dscp) = (self.settings.socket_buffer, self.settings.dscp);
             off_runtime(move || PacketSocket::spoof_dial(peer, buffer, dscp, spoof)).await?
-        } else if self.settings.paqet {
-            let (buffer, dscp) = (self.settings.socket_buffer, self.settings.dscp);
+        } else if self.settings.carrier == CarrierKind::Icmp {
+            off_runtime(move || PacketSocket::icmp_dial(peer, buffer, dscp)).await?
+        } else if self.settings.carrier == CarrierKind::Paqet {
             off_runtime(move || PacketSocket::paqet_dial(peer, buffer, dscp)).await?
+        } else if self.settings.carrier == CarrierKind::Dns {
+            PacketSocket::dns_dial(peer, buffer, dscp).await?
         } else {
-            PacketSocket::udp_connect(peer, self.settings.socket_buffer, self.settings.dscp).await?
+            PacketSocket::udp_connect(peer, buffer, dscp).await?
         };
         let peer = socket.peer_addr().unwrap_or(peer);
         let conv = Nonces::new()?.next_u32();
@@ -1389,11 +1427,12 @@ impl Drop for KcpListener {
 impl KcpListener {
     pub async fn bind(addr: &str, params: &KcpParams, tuning: &Tuning) -> io::Result<Self> {
         let mut addresses = tokio::net::lookup_host(addr).await?;
-        let addr = if matches!(params.carrier, CarrierKind::Paqet | CarrierKind::Spoof) {
+        let settings = ConnSettings::new(params, tuning);
+        let addr = if settings.ipv4_only() {
             addresses.find(|addr| addr.is_ipv4()).ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::Unsupported,
-                    "paqet and spoof support IPv4 only in this phase",
+                    "this transport supports IPv4 only in this phase",
                 )
             })?
         } else {
@@ -1401,15 +1440,17 @@ impl KcpListener {
                 io::Error::new(io::ErrorKind::NotFound, "listen address did not resolve")
             })?
         };
-        let settings = ConnSettings::new(params, tuning);
+        let (buffer, dscp) = (settings.socket_buffer, settings.dscp);
         let socket = if let Some(spoof) = settings.spoof.clone() {
-            let (buffer, dscp) = (settings.socket_buffer, settings.dscp);
             off_runtime(move || PacketSocket::spoof_listen(addr, buffer, dscp, spoof)).await?
-        } else if settings.paqet {
-            let (buffer, dscp) = (settings.socket_buffer, settings.dscp);
+        } else if settings.carrier == CarrierKind::Icmp {
+            off_runtime(move || PacketSocket::icmp_listen(addr, buffer, dscp)).await?
+        } else if settings.carrier == CarrierKind::Paqet {
             off_runtime(move || PacketSocket::paqet_listen(addr, buffer, dscp)).await?
+        } else if settings.carrier == CarrierKind::Dns {
+            PacketSocket::dns_listen(addr, buffer, dscp)?
         } else {
-            PacketSocket::udp_bind(addr, settings.socket_buffer, settings.dscp)?
+            PacketSocket::udp_bind(addr, buffer, dscp)?
         };
         let local = socket.local_addr();
         let (tx, rx) = mpsc::channel(ACCEPT_QUEUE);

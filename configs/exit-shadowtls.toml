@@ -1,0 +1,18 @@
+# Exit side (abroad), reverse mode over shadowtls. Pair: entry-shadowtls.toml.
+#
+# Dials the entry server and presents the token-derived SNI so the entry side knows this
+# is the real client rather than a probe. The handshake site must match the entry side.
+role = "exit"
+mode = "reverse"
+profile = "balanced"
+
+[tunnel]
+transport = "shadowtls"
+remote = "ENTRY_SERVER_IP:443"
+token = "CHANGE-ME-run-wormhole-token"
+
+[tunnel.shadowtls]
+handshake = "www.microsoft.com:443"
+
+[log]
+level = "info"

@@ -1,0 +1,12 @@
+# Exit side (abroad), reverse mode over xhttp. Pair: entry-xhttp.toml.
+role = "exit"
+mode = "reverse"
+profile = "balanced"
+
+[tunnel]
+transport = "xhttp"
+remote = "ENTRY_SERVER_IP:8080"
+token = "CHANGE-ME-run-wormhole-token"
+
+[log]
+level = "info"

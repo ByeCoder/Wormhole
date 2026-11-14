@@ -1,0 +1,23 @@
+# Entry side (Iran), reverse mode over icmp: KCP carried inside ICMP echo (ping) packets
+# over a raw socket, for a path where UDP and TCP are blocked or throttled but ping still
+# gets through. Pair: exit-icmp.toml.
+#
+# icmp runs over IPv4 only, needs root (or CAP_NET_RAW), and adds scoped firewall rules of
+# its own so the kernel's own ping replies do not double the traffic. The ICMP identifier
+# in `listen`'s port tells several tunnels (and the host's own ping) apart. Every packet
+# is encrypted with an icmp-specific key from the token.
+role = "entry"
+mode = "reverse"
+profile = "balanced"
+
+[tunnel]
+transport = "icmp"                 # handshake, encryption and mux run on top, as over kcp
+listen = "0.0.0.0:4000"            # the port is the ICMP echo identifier, not a TCP/UDP port
+token = "CHANGE-ME-run-wormhole-token"
+
+[[forward]]
+listen = "0.0.0.0:443"
+target = "127.0.0.1:443"
+
+[log]
+level = "info"

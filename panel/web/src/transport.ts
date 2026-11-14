@@ -1,13 +1,16 @@
 import type { MuxSpec } from "./api";
 
 /** The transports a person chooses from. `tcp` with mux on is the core's `tcpmux`; with mux off, plain `tcp`. */
-export const TRANSPORTS = ["auto", "tcp", "ws", "wss", "quic", "kcp", "paqet", "spoof"] as const;
+export const TRANSPORTS = ["auto", "tcp", "ws", "wss", "quic", "kcp", "paqet", "spoof", "icmp", "dns", "grpc", "xhttp", "shadowtls"] as const;
 
 /** Transports where mux can be turned off (`auto` and `quic` always multiplex). */
-export const MUX_OPTIONAL = ["tcp", "ws", "wss", "kcp", "paqet"];
+export const MUX_OPTIONAL = ["tcp", "ws", "wss", "kcp", "paqet", "icmp", "dns", "grpc", "xhttp", "shadowtls"];
 
 /** Transports that ride a raw IPv4 TCP carrier (IPv4 only, listen on 0.0.0.0, no GRE). */
 export const RAW_TCP = ["paqet", "spoof"];
+
+/** Transports on a raw IPv4 carrier: IPv4 only, listen on every address, no GRE. `icmp` rides raw ICMP, the others raw TCP. */
+export const RAW_IP = ["paqet", "spoof", "icmp"];
 
 /** A tunnel's core transport (and mux settings) as the form shows them: a transport and whether mux is on. */
 export function splitTransport(core: string, mux?: MuxSpec | null): { transport: string; mux: boolean } {
@@ -26,9 +29,10 @@ export function joinTransport(transport: string, mux: boolean): { core: string; 
 /** The ports a management link uses on `port` (TCP and UDP, and the next one), for a firewall: all of them for auto, else the one transport's. */
 export function linkPorts(port: number, transport: string): string {
   if (transport === "auto") return `TCP ${port}, UDP ${port}, TCP ${port + 1}, UDP ${port + 1}`;
-  if (transport === "kcp") return `UDP ${port}`;
+  if (transport === "kcp" || transport === "dns") return `UDP ${port}`;
   if (transport === "quic") return `UDP ${port + 1}`;
   if (transport === "wss") return `TCP ${port + 1}`;
+  if (transport === "icmp") return `ICMP echo (IP protocol 1)`;
   return `TCP ${port}`;
 }
 

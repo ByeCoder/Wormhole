@@ -31,6 +31,7 @@ pub mod tunnel_meta;
 pub mod update;
 pub mod updater;
 pub mod usage;
+pub mod wgkey;
 pub mod wire;
 
 use std::path::Path;

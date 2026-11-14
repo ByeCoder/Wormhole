@@ -1146,7 +1146,7 @@ impl Hub {
                     let agent_port = self.agent_port_of(id).unwrap_or(agent_port);
                     let code = self.rejoin_code(
                         id,
-                        &format!("{panel_addr}:{agent_port}"),
+                        &crate::netops::host_port(&panel_addr, &agent_port.to_string()),
                         transport,
                         Some(theirs.clone()),
                         None,
@@ -1237,6 +1237,10 @@ impl Hub {
         let base = match kind {
             LinkKind::Gre => "wormhole",
             LinkKind::Vxlan => "wormhole-vxlan",
+            LinkKind::Ipip => "wormhole-ipip",
+            LinkKind::Geneve => "wormhole-geneve",
+            LinkKind::Wireguard => "wormhole-wg",
+            LinkKind::Sit => "wormhole-sit",
         };
         // A name taken by a network of the other kind gets a number.
         let name = (1..)
