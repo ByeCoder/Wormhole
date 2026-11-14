@@ -38,6 +38,14 @@ layers above them are unchanged. Both servers need 1.2.0.
   panel: pick *XHTTP* as the transport. Sample configs: `configs/entry-xhttp.toml`,
   `configs/exit-xhttp.toml`. Guide: [Transports](docs/transports.md#xhttp).
 
+Private networks:
+
+- **IPIP** and **Geneve** link kinds, beside GRE and VXLAN, in the panel's private networks.
+  IPIP is the lightest (IPv4 in IPv4, 20 bytes per packet, no key or port); Geneve is VXLAN's
+  IETF-standard cousin (UDP port 6081 by default, 50 bytes). Both work over IPv4 and IPv6, are
+  offered in *Add server* and when making a network, and the agent reports whether the kernel
+  can make each. Guide: [Private networks](docs/networks.md#ipip-and-geneve).
+
 ## 1.1.0 - 2026-11-13
 
 - **Two new ways to carry a `ws` / `wss` tunnel** (`[tunnel.ws] mode`, both servers 1.1.0):

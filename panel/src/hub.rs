@@ -1237,6 +1237,8 @@ impl Hub {
         let base = match kind {
             LinkKind::Gre => "wormhole",
             LinkKind::Vxlan => "wormhole-vxlan",
+            LinkKind::Ipip => "wormhole-ipip",
+            LinkKind::Geneve => "wormhole-geneve",
         };
         // A name taken by a network of the other kind gets a number.
         let name = (1..)

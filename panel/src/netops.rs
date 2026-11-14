@@ -19,6 +19,10 @@ use crate::wire::{Ack, LinkKind, NetSpec, NetStatus, PingReply, PmtuReply, Reque
 /// not know its fields), so the panel says so before it tries.
 pub const VXLAN_SINCE: (u32, u32, u32) = (1, 0, 0);
 
+/// The first version whose agent makes IPIP and Geneve links. An older one does not know
+/// the kind, so the panel says so before it tries.
+pub const NETKIND_SINCE: (u32, u32, u32) = (1, 2, 0);
+
 /// How long a server is waited for while the interfaces of deleted links are removed from
 /// it. Deleting never waits on a server for longer: one that does not answer is asked again.
 pub const DOWN_WAIT: Duration = Duration::from_secs(5);
@@ -80,7 +84,11 @@ pub(crate) fn spec_for(link: &Link, server: &str, local: &str, remote: &str, mtu
         name: link.ifname.clone(),
         local: local.to_owned(),
         remote: remote.to_owned(),
-        key: link.gre_key,
+        key: if link.kind == LinkKind::Ipip {
+            0
+        } else {
+            link.gre_key
+        },
         address: if first { &link.addr_a } else { &link.addr_b }.clone(),
         peer: if first { &link.addr_b } else { &link.addr_a }.clone(),
         prefix: 30,
@@ -332,6 +340,10 @@ async fn bring_up(hub: &Hub, link: &Link) -> Result<(), String> {
             (LinkKind::Gre, true) => "gre6_blocked".to_owned(),
             (LinkKind::Vxlan, false) => format!("vxlan_blocked:{}", link.port),
             (LinkKind::Vxlan, true) => format!("vxlan6_blocked:{}", link.port),
+            (LinkKind::Ipip, false) => "ipip_blocked".to_owned(),
+            (LinkKind::Ipip, true) => "ipip6_blocked".to_owned(),
+            (LinkKind::Geneve, false) => format!("geneve_blocked:{}", link.port),
+            (LinkKind::Geneve, true) => format!("geneve6_blocked:{}", link.port),
         })
     }
 }
@@ -490,15 +502,23 @@ pub async fn check_kind(hub: &Hub, server: &str, kind: LinkKind, v6: bool) -> Re
     if v6 && !hub.agent_since(server, IPV6_SINCE) {
         return Err(format!("old_agent_v6:{server}:{}", hub.version_of(server)));
     }
-    if kind == LinkKind::Vxlan {
-        let version = hub
-            .snapshot()
+    let version_of = || {
+        hub.snapshot()
             .ok()
             .and_then(|all| all.into_iter().find(|s| s.id == server))
             .map(|s| s.version)
-            .unwrap_or_default();
+            .unwrap_or_default()
+    };
+    if kind == LinkKind::Vxlan {
+        let version = version_of();
         if !crate::pair::version_at_least(&version, VXLAN_SINCE) {
             return Err(format!("old_agent_vxlan:{server}:{version}"));
+        }
+    }
+    if matches!(kind, LinkKind::Ipip | LinkKind::Geneve) {
+        let version = version_of();
+        if !crate::pair::version_at_least(&version, NETKIND_SINCE) {
+            return Err(format!("old_agent_{}:{server}:{version}", kind.as_str()));
         }
     }
     let status: NetStatus = hub
@@ -510,6 +530,10 @@ pub async fn check_kind(hub: &Hub, server: &str, kind: LinkKind, v6: bool) -> Re
         (LinkKind::Vxlan, false) if !status.vxlan => Err(format!("no_vxlan:{server}")),
         (LinkKind::Gre, true) if !status.gre6 => Err(format!("no_gre6:{server}")),
         (LinkKind::Vxlan, true) if !status.vxlan6 => Err(format!("no_vxlan6:{server}")),
+        (LinkKind::Ipip, false) if !status.ipip => Err(format!("no_ipip:{server}")),
+        (LinkKind::Ipip, true) if !status.ipip6 => Err(format!("no_ipip6:{server}")),
+        (LinkKind::Geneve, false) if !status.geneve => Err(format!("no_geneve:{server}")),
+        (LinkKind::Geneve, true) if !status.geneve6 => Err(format!("no_geneve6:{server}")),
         _ => Ok(()),
     }
 }

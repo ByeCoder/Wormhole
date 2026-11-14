@@ -234,13 +234,14 @@ export interface SpeedPoll {
 export type LinkTransport = "auto" | "tcpmux" | "kcp" | "wss" | "quic";
 
 /** How a private network's links are made. */
-export type LinkKind = "gre" | "vxlan";
+export type LinkKind = "gre" | "vxlan" | "ipip" | "geneve";
 
 /** Whether a benchmark path goes across a private network link (GRE or VXLAN). */
 export const isPrivatePath = (path: string) => path === "gre" || path === "vxlan";
 
 /** "GRE" or "VXLAN", as a label. */
-export const kindLabel = (kind: LinkKind | undefined) => (kind === "vxlan" ? "VXLAN" : "GRE");
+export const kindLabel = (kind: LinkKind | undefined) =>
+  kind === "vxlan" ? "VXLAN" : kind === "ipip" ? "IPIP" : kind === "geneve" ? "Geneve" : "GRE";
 
 /** The panel's address on a private (GRE or VXLAN) network link to another server: what that server's agent can dial. */
 export interface GreAddr {

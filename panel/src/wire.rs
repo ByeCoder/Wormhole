@@ -173,6 +173,10 @@ pub enum LinkKind {
     Gre,
     /// Ethernet frames in UDP datagrams.
     Vxlan,
+    /// IPv4 in IPv4 (IP protocol 4), the lightest encapsulation. No key or port.
+    Ipip,
+    /// Like VXLAN but the IETF-standard header (UDP, port 6081 by default).
+    Geneve,
 }
 
 impl LinkKind {
@@ -180,10 +184,17 @@ impl LinkKind {
         *self == Self::Gre
     }
 
+    /// Whether the link rides UDP (a port is used): VXLAN and Geneve.
+    pub fn is_udp(&self) -> bool {
+        matches!(self, Self::Vxlan | Self::Geneve)
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Gre => "gre",
             Self::Vxlan => "vxlan",
+            Self::Ipip => "ipip",
+            Self::Geneve => "geneve",
         }
     }
 
@@ -191,6 +202,8 @@ impl LinkKind {
         match text {
             "gre" => Some(Self::Gre),
             "vxlan" => Some(Self::Vxlan),
+            "ipip" => Some(Self::Ipip),
+            "geneve" => Some(Self::Geneve),
             _ => None,
         }
     }
@@ -227,6 +240,26 @@ pub struct NetStatus {
     pub vxlan6: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vxlan6_reason: Option<String>,
+    /// This server can make IPIP (and `ip6tnl`) interfaces. An agent before 1.2.0 does not
+    /// say, which reads as no.
+    #[serde(default)]
+    pub ipip: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ipip_reason: Option<String>,
+    #[serde(default)]
+    pub ipip6: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ipip6_reason: Option<String>,
+    /// This server can make Geneve interfaces (the `geneve` module). An agent before 1.2.0
+    /// does not say, which reads as no.
+    #[serde(default)]
+    pub geneve: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub geneve_reason: Option<String>,
+    #[serde(default)]
+    pub geneve6: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub geneve6_reason: Option<String>,
     #[serde(default)]
     pub links: Vec<NetIface>,
 }

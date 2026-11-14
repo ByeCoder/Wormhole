@@ -16,7 +16,7 @@ use serde::Serialize;
 use crate::auth::now;
 use crate::config::random_hex;
 use crate::db::Db;
-use crate::net::{VNI_MAX, VXLAN_PORT};
+use crate::net::{GENEVE_PORT, VNI_MAX, VXLAN_PORT};
 use crate::wire::LinkKind;
 
 /// An IPv4 network: the address of its first host bit pattern, and how many bits are fixed.
@@ -232,8 +232,12 @@ impl Networks {
         let port = match kind {
             LinkKind::Gre if port != 0 => bail!("bad_port"),
             LinkKind::Gre => 0,
+            LinkKind::Ipip if port != 0 => bail!("bad_port"),
+            LinkKind::Ipip => 0,
             LinkKind::Vxlan if port == 0 => VXLAN_PORT,
             LinkKind::Vxlan => port,
+            LinkKind::Geneve if port == 0 => GENEVE_PORT,
+            LinkKind::Geneve => port,
         };
         let pool = Cidr::parse(cidr)?;
         check_pool(pool)?;
@@ -415,8 +419,10 @@ impl Networks {
             // server, whoever the peer is); it is also new for the pair, as the schema wants.
             let taken: HashSet<u32> = {
                 let sql = match kind {
-                    LinkKind::Gre => "SELECT gre_key FROM net_links WHERE a = ?1 AND b = ?2",
-                    LinkKind::Vxlan => {
+                    LinkKind::Gre | LinkKind::Ipip => {
+                        "SELECT gre_key FROM net_links WHERE a = ?1 AND b = ?2"
+                    }
+                    LinkKind::Vxlan | LinkKind::Geneve => {
                         "SELECT gre_key FROM net_links WHERE a IN (?1, ?2) OR b IN (?1, ?2)"
                     }
                 };
