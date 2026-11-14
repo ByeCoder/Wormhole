@@ -25,7 +25,6 @@ export const ui = {
     tagline: "A fast, light tunnel core in Rust",
     skip: "Skip to content",
     docs: "Documentation",
-    tryPanel: "Try the panel",
     github: "GitHub",
     support: "Support",
     search: "Search the docs",
@@ -52,17 +51,12 @@ export const ui = {
     notFoundText: "The channel ends before this well. Try the documentation index or the search.",
     backHome: "Back to the front page",
     docsIntro: "Start with Getting started. Come back to the reference when you need a specific setting.",
-    demoTitle: "Try the panel",
-    demoLead: "The real panel's screens, fed with sample data. Everything runs in this page; nothing is sent anywhere.",
-    demoOpen: "Open it full screen",
-    demoNote: "Sample data. The password is wormhole.",
     breadcrumb: "Breadcrumb",
   },
   fa: {
     tagline: "هستهٔ تانل سریع و سبک، با Rust",
     skip: "پرش به محتوا",
     docs: "مستندات",
-    tryPanel: "پنل را امتحان کنید",
     github: "گیت‌هاب",
     support: "حمایت",
     search: "جستجو در مستندات",
@@ -89,10 +83,6 @@ export const ui = {
     notFoundText: "مجرا پیش از این چاه تمام می‌شود. فهرست مستندات یا جستجو را امتحان کنید.",
     backHome: "بازگشت به صفحهٔ اول",
     docsIntro: "از «شروع کار» آغاز کنید. برای یک تنظیم مشخص به صفحه‌های مرجع برگردید.",
-    demoTitle: "پنل را امتحان کنید",
-    demoLead: "صفحه‌های پنل واقعی، با داده‌های نمونه. همه‌چیز در همین صفحه اجرا می‌شود و چیزی جایی فرستاده نمی‌شود.",
-    demoOpen: "باز کردن تمام‌صفحه",
-    demoNote: "داده‌های نمونه. رمز: wormhole",
     breadcrumb: "مسیر",
   },
 } as const;
@@ -105,7 +95,7 @@ export interface Section {
 
 /** The map of the docs. A slug is the file name of a page in `docs/`, lower case. */
 export const SECTIONS: Section[] = [
-  { id: "start", title: { en: "Get started", fa: "شروع کار" }, pages: ["getting-started", "using-the-panel", "video", "tour", "manager", "panel"] },
+  { id: "start", title: { en: "Get started", fa: "شروع کار" }, pages: ["getting-started", "using-the-panel", "manager", "panel"] },
   { id: "concepts", title: { en: "Concepts", fa: "مفاهیم" }, pages: ["how-it-works", "transports", "profiles", "udp-and-games", "cdn"] },
   { id: "guides", title: { en: "Guides", fa: "راهنماها" }, pages: ["networks", "paqet", "troubleshooting", "speedtest", "telegram", "performance"] },
   { id: "reference", title: { en: "Reference", fa: "مرجع" }, pages: ["configuration", "status", "accessibility"] },
@@ -119,8 +109,6 @@ export const LABELS: Record<string, Record<Lang, string>> = {
   manager: { en: "The manager script", fa: "اسکریپت مدیر" },
   panel: { en: "The web panel", fa: "پنل وب" },
   "using-the-panel": { en: "Using the panel", fa: "کار با پنل" },
-  tour: { en: "Guided tour", fa: "تور راهنما" },
-  video: { en: "Video tutorial", fa: "ویدیوی آموزشی" },
   "how-it-works": { en: "How it works", fa: "چطور کار می‌کند" },
   transports: { en: "Transports", fa: "ترنسپورت‌ها" },
   profiles: { en: "Profiles", fa: "پروفایل‌ها" },
@@ -143,7 +131,7 @@ export const LABELS: Record<string, Record<Lang, string>> = {
 };
 
 /** Pages made by the site itself (not a file of docs/): they exist in both languages. */
-export const OWN_PAGES = new Set(["how-it-works", "tour", "video"]);
+export const OWN_PAGES = new Set(["how-it-works"]);
 
 export const sectionOf = (slug: string) => SECTIONS.find((s) => s.pages.includes(slug));
 

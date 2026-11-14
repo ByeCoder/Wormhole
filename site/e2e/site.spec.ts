@@ -9,16 +9,11 @@ const PAGES = [
   "/docs/how-it-works/",
   "/docs/transports/",
   "/docs/troubleshooting/",
-  "/try/",
   "/fa/",
   "/fa/docs/",
   "/fa/docs/how-it-works/",
   "/fa/docs/getting-started/",
   "/fa/docs/transports/",
-  "/docs/tour/",
-  "/fa/docs/tour/",
-  "/docs/video/",
-  "/fa/docs/video/",
   "/fa/docs/using-the-panel/",
 ];
 
@@ -32,10 +27,9 @@ for (const theme of ["night", "dawn"] as const) {
   for (const path of PAGES) {
     test(`${path} passes axe (${theme})`, async ({ page }) => {
       await open(page, path, theme);
-      // The hero and its scroll are pictures with no words in them; the demo has its own tests.
+      // The hero and its scroll are pictures with no words in them.
       const r = await new AxeBuilder({ page })
         .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"])
-        .exclude("iframe")
         .exclude("[data-hero-canvas]")
         .analyze();
       expect(r.violations.map((v) => `${v.id}: ${v.nodes.map((n) => n.target.join(" ")).join(" | ")}`)).toEqual([]);
@@ -154,14 +148,6 @@ test("the low-power button brings motion back when the system asks for less", as
   await expect(page.locator("html")).toHaveAttribute("data-low", "0");
 });
 
-test("the video page has a player and chapters that move it", async ({ page }) => {
-  await open(page, "/docs/video/");
-  const video = page.locator("video[data-video]");
-  await expect(video).toHaveAttribute("poster", /poster\.jpg$/);
-  await expect(video.locator("source")).toHaveAttribute("src", /wormhole-panel-tutorial\.mp4$/);
-  await page.locator("[data-seek]").nth(3).click();
-  await expect.poll(() => video.evaluate((v: HTMLVideoElement) => Math.round(v.currentTime))).toBeGreaterThanOrEqual(30);
-});
 
 test("reduced motion holds the hero still and one screen tall", async ({ page }) => {
   await page.emulateMedia({ reducedMotion: "reduce" });
@@ -210,12 +196,6 @@ for (const theme of ["night", "dawn"] as const) {
   });
 }
 
-test("the panel demo runs in the page, in the page's language", async ({ page }) => {
-  await open(page, "/fa/try/");
-  const demo = page.frameLocator("iframe");
-  await expect(demo.locator("html")).toHaveAttribute("dir", "rtl");
-  await expect(demo.getByRole("button", { name: /wormhole|ورود/i }).first()).toBeVisible();
-});
 
 test("a page that is not there says so, with a way out", async ({ page }) => {
   const r = await page.goto(`${B}/docs/no-such-page/`);
@@ -223,13 +203,3 @@ test("a page that is not there says so, with a way out", async ({ page }) => {
   await expect(page.getByRole("heading", { name: "This page is not here." })).toBeVisible();
 });
 
-test("the guided tour signs in and takes the demo to each screen", async ({ page }) => {
-  await open(page, "/docs/tour/");
-  const demo = page.frameLocator("iframe");
-  await expect(demo.locator("#login.is-on")).toBeVisible({ timeout: 15_000 });
-  await page.getByRole("button", { name: "Next" }).click(); // the map: signs in first
-  await expect(demo.locator("#app.is-on")).toBeVisible({ timeout: 15_000 });
-  await page.getByRole("button", { name: "Next" }).click(); // servers
-  await expect(demo.locator(".tour-hi")).toHaveId("srv-add");
-  await expect(page.getByRole("status")).toContainText("3 of 9");
-});

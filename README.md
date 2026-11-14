@@ -14,7 +14,6 @@
   <b>English</b> · <a href="README_FA.md">فارسی</a> ·
   <a href="https://byecoder.github.io/Wormhole/">Website</a> ·
   <a href="https://byecoder.github.io/Wormhole/docs/">Docs</a> ·
-  <a href="https://byecoder.github.io/Wormhole/try/">Live demo</a> ·
   <a href="CHANGELOG.md">Changelog</a>
 </p>
 
@@ -66,8 +65,6 @@ From there, everything's in the browser:
 2. use the wizard to make a tunnel between any two of them,
 3. done! 🎉
 
-Want to poke around first? The [live demo](https://byecoder.github.io/Wormhole/try/) runs the real panel on sample data.
-
 ## New in 1.2.0 ✨
 
 - **Five new transports** for the hardest paths (both servers need 1.2.0):
@@ -96,7 +93,7 @@ Everything else is on the website, in English and Persian:
 | | |
 |---|---|
 | [Getting started](https://byecoder.github.io/Wormhole/docs/getting-started/) | install, your first tunnel, systemd |
-| [Using the panel](https://byecoder.github.io/Wormhole/docs/using-the-panel/) · [Guided tour](https://byecoder.github.io/Wormhole/docs/tour/) · [Video](https://byecoder.github.io/Wormhole/docs/video/) | the panel, page by page |
+| [Using the panel](https://byecoder.github.io/Wormhole/docs/using-the-panel/) | the panel, page by page |
 | [The manager script](https://byecoder.github.io/Wormhole/docs/manager/) | installing, updating, the menu |
 | [Transports](https://byecoder.github.io/Wormhole/docs/transports/) · [Which one?](https://byecoder.github.io/Wormhole/docs/how-it-works/) · [Paqet](https://byecoder.github.io/Wormhole/docs/paqet/) | picking and tuning |
 | [Configuration reference](https://byecoder.github.io/Wormhole/docs/configuration/) | every setting, with defaults and limits |

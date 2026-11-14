@@ -14,7 +14,6 @@
   <a href="README.md">English</a> · <b>فارسی</b> ·
   <a href="https://byecoder.github.io/Wormhole/fa/">وب‌سایت</a> ·
   <a href="https://byecoder.github.io/Wormhole/fa/docs/">مستندات</a> ·
-  <a href="https://byecoder.github.io/Wormhole/fa/try/">دموی زنده</a> ·
   <a href="docs/fa/CHANGELOG.md">تغییرات</a>
 </p>
 
@@ -76,7 +75,6 @@ bash <(curl -fsSL https://raw.githubusercontent.com/ByeCoder/Wormhole/main/scrip
 2. با ویزارد بین هر دو تاشون یه تانل بساز،
 3. و تمام! 🎉
 
-اول می‌خوای ببینی چه شکلیه؟ [دموی زنده](https://byecoder.github.io/Wormhole/fa/try/) رو باز کن.
 
 ## تو نسخهٔ ۱٫۲٫۰ چی اضافه شد؟ ✨
 
@@ -106,7 +104,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/ByeCoder/Wormhole/main/scrip
 | | |
 |---|---|
 | [شروع کار](https://byecoder.github.io/Wormhole/fa/docs/getting-started/) | نصب، اولین تانل، systemd |
-| [کار با پنل](https://byecoder.github.io/Wormhole/fa/docs/using-the-panel/) · [تور راهنما](https://byecoder.github.io/Wormhole/fa/docs/tour/) · [ویدیوی آموزشی](https://byecoder.github.io/Wormhole/fa/docs/video/) | پنل، صفحه به صفحه |
+| [کار با پنل](https://byecoder.github.io/Wormhole/fa/docs/using-the-panel/) | پنل، صفحه به صفحه |
 | [اسکریپت مدیر](https://byecoder.github.io/Wormhole/fa/docs/manager/) | نصب، آپدیت، منو |
 | [ترنسپورت‌ها](https://byecoder.github.io/Wormhole/fa/docs/transports/) · [کدوم یکی؟](https://byecoder.github.io/Wormhole/fa/docs/how-it-works/) · [Paqet](https://byecoder.github.io/Wormhole/fa/docs/paqet/) | انتخاب و تنظیم |
 | [مرجع تنظیمات](https://byecoder.github.io/Wormhole/fa/docs/configuration/) | همهٔ تنظیم‌ها با پیش‌فرض و محدوده |

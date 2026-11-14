@@ -45,15 +45,6 @@ lowBtn?.addEventListener("click", () => {
 });
 reduced.addEventListener("change", syncLow);
 
-// ---- The demo opens in the theme the reader is in ----
-if (root.dataset.theme === "dawn") {
-  for (const f of $$<HTMLIFrameElement>("iframe[src*='/demo/']")) {
-    const u = new URL(f.src, location.href);
-    u.searchParams.set("theme", "dawn");
-    f.src = u.href;
-  }
-}
-
 // ---- Sidebar on a phone ----
 const menu = $<HTMLButtonElement>("[data-menu]");
 const side = $<HTMLElement>("#side");
