@@ -35,7 +35,7 @@ It's one small Rust program (around 8 MiB of RAM per side, no garbage collector)
 ```mermaid
 flowchart LR
     U([Users]) -->|TCP / UDP| E[Entry]
-    E <==>|"Wormhole tunnel<br/>tcp · tcpmux · ws · wss · httpupgrade · tls · quic · kcp · paqet · spoof"| X[Exit]
+    E <==>|"Wormhole tunnel<br/>tcp · tcpmux · ws · wss · httpupgrade · tls · quic · kcp · paqet · spoof · icmp · dns · grpc · xhttp · shadowtls"| X[Exit]
     X --> T([Targets])
 ```
 
@@ -68,21 +68,23 @@ From there, everything's in the browser:
 
 Want to poke around first? The [live demo](https://byecoder.github.io/Wormhole/try/) runs the real panel on sample data.
 
-## New in 1.1.0 ✨
+## New in 1.2.0 ✨
 
-- **The panel lives in space now.** Everything floats in a living galaxy. The map is a **3D neon planet**: your servers stand in their own cities, and every tunnel is an arc of light from one side of the world to the other. When a tunnel comes up, its light shoots across like a beam. Drag the planet to spin it!
-- **Every tunnel's page is an actual wormhole** between two little worlds, with its traffic swirling through as light.
-- **Two new ways to run `ws` and `wss`:**
-  - `httpupgrade`: a CDN still sees a WebSocket, but after the handshake the bytes go unframed and unmasked, so there's less CPU work and less overhead.
-  - `tls`: plain TLS with the tunnel right inside, no HTTP at all. The lightest way to pass as an ordinary HTTPS site (direct routes only, not behind a CDN).
+- **Five new transports** for the hardest paths (both servers need 1.2.0):
+  - [`icmp`](docs/transports.md#icmp): the tunnel hidden inside ICMP echo (ping) packets, for routes where UDP and TCP are blocked but ping still gets through.
+  - [`dns`](docs/transports.md#dns): wrapped in DNS query/response messages, for paths that pass only DNS.
+  - [`grpc`](docs/transports.md#grpc): one bidirectional gRPC call over HTTP/2, to slip through CDNs and proxies that speak gRPC.
+  - [`xhttp`](docs/transports.md#xhttp): streamed over an ordinary HTTP/1.1 request, like XHTTP in Xray.
+  - [`shadowtls`](docs/transports.md#shadowtls): disguised as a connection to a real HTTPS site — stray probes are relayed to the genuine site, so the port looks like an ordinary mirror of it.
+- **Three new private-network kinds**, beside GRE and VXLAN: **IPIP** (the lightest, 20 bytes), **Geneve** (VXLAN's IETF-standard cousin), and **[WireGuard](docs/networks.md#wireguard)** — the first *encrypted* one, with the panel generating and distributing both ends' keys for you.
 - **Lighter:** the panel is 16 % smaller, and animations pause themselves when you can't see them.
 
 ## What you get 🚀
 
-- **Lots of ways through.** `tcp`, `tcpmux`, `ws` and `wss` (for CDNs, or whenever you need to look like HTTPS; now also as [`httpupgrade`](docs/transports.md#httpupgrade-and-plain-tls) and plain `tls`). Then `quic` and `kcp` over UDP for long or lossy routes, and [`paqet`](docs/paqet.md): KCP hidden in raw TCP segments, for networks that block UDP but let TCP through. `quic` can be sealed packet by packet so it stops looking like QUIC. [`spoof`](docs/transports.md) goes one step further and forges the source address, for Layer-3 whitelist firewalls. Can't be bothered to choose? `auto` finds one that works.
+- **Lots of ways through.** `tcp`, `tcpmux`, `ws` and `wss` (for CDNs, or whenever you need to look like HTTPS; now also as [`httpupgrade`](docs/transports.md#httpupgrade-and-plain-tls) and plain `tls`). Then `quic` and `kcp` over UDP for long or lossy routes, and [`paqet`](docs/paqet.md): KCP hidden in raw TCP segments, for networks that block UDP but let TCP through. `quic` can be sealed packet by packet so it stops looking like QUIC. [`spoof`](docs/transports.md) goes one step further and forges the source address, for Layer-3 whitelist firewalls. And for the hardest paths there are [`icmp`, `dns`, `grpc`, `xhttp` and `shadowtls`](docs/transports.md). Can't be bothered to choose? `auto` finds one that works.
 - **Either direction.** The exit can call the entry (`reverse`) or the other way round (`direct`), and it reconnects on its own if the link drops.
 - **TCP and UDP.** WireGuard, DNS and games all go through. On `kcp`, `paqet` and `quic` one lost packet doesn't hold up everything else, and games get FEC and optional packet duplication.
-- **A panel that cleans up after itself.** The wizard checks both servers before it builds anything, and if something breaks halfway it puts both back the way they were. The map, charts, logs, speed test, backups, private GRE/VXLAN networks and updates all live in the same place.
+- **A panel that cleans up after itself.** The wizard checks both servers before it builds anything, and if something breaks halfway it puts both back the way they were. The map, charts, logs, speed test, backups, private GRE/VXLAN/IPIP/Geneve/WireGuard networks and updates all live in the same place.
 - **Real usage numbers.** Every tunnel and server shows what it used today, this week, this month and all time (Solar Hijri or Gregorian calendar). The numbers come from the kernel's own counters, overhead and resends included. Give a server a monthly quota and it warns you before you hit it.
 - **Telegram alerts.** Your own bot pings you when a server goes offline or a tunnel drops (and when it's back), and answers `/status` with the state of everything. If Telegram is blocked, it goes through a proxy or a tunnel. [Set it up](https://byecoder.github.io/Wormhole/docs/telegram/).
 - **Signed releases.** The install script, the panel and its agents all check a release's signature before running anything from it.
