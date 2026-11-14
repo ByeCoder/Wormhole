@@ -2029,6 +2029,7 @@ async fn network_create(
                 LinkKind::Vxlan => format!("VXLAN, UDP {}", n.port),
                 LinkKind::Ipip => "IPIP".to_owned(),
                 LinkKind::Geneve => format!("Geneve, UDP {}", n.port),
+                LinkKind::Wireguard => format!("WireGuard, UDP {}", n.port),
             };
             audit(
                 &state,

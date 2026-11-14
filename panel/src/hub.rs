@@ -1239,6 +1239,7 @@ impl Hub {
             LinkKind::Vxlan => "wormhole-vxlan",
             LinkKind::Ipip => "wormhole-ipip",
             LinkKind::Geneve => "wormhole-geneve",
+            LinkKind::Wireguard => "wormhole-wg",
         };
         // A name taken by a network of the other kind gets a number.
         let name = (1..)

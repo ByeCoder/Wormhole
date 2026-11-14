@@ -56,6 +56,12 @@ Private networks:
   IETF-standard cousin (UDP port 6081 by default, 50 bytes). Both work over IPv4 and IPv6, are
   offered in *Add server* and when making a network, and the agent reports whether the kernel
   can make each. Guide: [Private networks](docs/networks.md#ipip-and-geneve).
+- **WireGuard** private networks, the first **encrypted** link kind. The panel generates a
+  Curve25519 key pair for each end (as `wg genkey` does), stores them, and hands each server only
+  its own private key and the peer's public key — nothing is typed by hand. UDP (port 51820 by
+  default), 60 bytes per packet, over IPv4 or IPv6; needs the `wireguard` module and the `wg`
+  tool. Offered in *Add server* alongside GRE/VXLAN/IPIP/Geneve. Guide:
+  [Private networks](docs/networks.md#wireguard).
 
 ## 1.1.0 - 2026-11-13
 

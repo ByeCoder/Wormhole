@@ -10,7 +10,7 @@ const VXLAN_PORT = 4789;
 
 /** A network's kind as a short tag: `GRE`, `VXLAN · UDP 4789`, and `· IPv6` for one over IPv6. */
 export function kindTag(n: { kind?: LinkKind; port?: number; ipv6?: boolean }): string {
-  return (n.kind === "vxlan" ? `VXLAN · UDP ${n.port || VXLAN_PORT}` : "GRE") + (n.ipv6 ? " · IPv6" : "");
+  return (n.kind === "vxlan" ? `VXLAN · UDP ${n.port || VXLAN_PORT}` : n.kind === "ipip" ? "IPIP" : n.kind === "geneve" ? `Geneve · UDP ${n.port || 6081}` : n.kind === "wireguard" ? `WireGuard · UDP ${n.port || 51820}` : "GRE") + (n.ipv6 ? " · IPv6" : "");
 }
 
 /** The IPv6 address a server's end of a link over IPv6 is made with, if the panel knows one. */
@@ -268,7 +268,7 @@ function AddLinks({ network, servers, onClose }: { network: Network; servers: Se
 
 /** The bytes a link of this kind adds to every packet (GRE with its key, or VXLAN). */
 function overhead(l: Link): number {
-  return (l.kind === "vxlan" ? 50 : 28) + (l.ipv6 ? 20 : 0);
+  return (l.kind === "vxlan" ? 50 : l.kind === "ipip" ? 20 : l.kind === "geneve" ? 50 : l.kind === "wireguard" ? 60 : 28) + (l.ipv6 ? 20 : 0);
 }
 
 /** The MTU a link's interfaces have: its own, or the most a 1500-byte path allows. */

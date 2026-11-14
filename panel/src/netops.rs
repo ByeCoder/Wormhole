@@ -84,7 +84,9 @@ pub(crate) fn spec_for(link: &Link, server: &str, local: &str, remote: &str, mtu
         name: link.ifname.clone(),
         local: local.to_owned(),
         remote: remote.to_owned(),
-        key: if link.kind == LinkKind::Ipip {
+        // IPIP and WireGuard carry no VNI/key on the wire; the stored `gre_key` is only the
+        // panel's per-pair discriminator, so the agent is sent 0.
+        key: if matches!(link.kind, LinkKind::Ipip | LinkKind::Wireguard) {
             0
         } else {
             link.gre_key
@@ -95,6 +97,20 @@ pub(crate) fn spec_for(link: &Link, server: &str, local: &str, remote: &str, mtu
         mtu,
         kind: link.kind,
         port: link.port,
+        // WireGuard: each end gets its own private key and the other end's public key. Empty
+        // for every other kind (the fields are skipped when serialized).
+        wg_private: if first {
+            &link.wg_priv_a
+        } else {
+            &link.wg_priv_b
+        }
+        .clone(),
+        wg_peer: if first {
+            &link.wg_pub_b
+        } else {
+            &link.wg_pub_a
+        }
+        .clone(),
     }
 }
 
@@ -344,6 +360,8 @@ async fn bring_up(hub: &Hub, link: &Link) -> Result<(), String> {
             (LinkKind::Ipip, true) => "ipip6_blocked".to_owned(),
             (LinkKind::Geneve, false) => format!("geneve_blocked:{}", link.port),
             (LinkKind::Geneve, true) => format!("geneve6_blocked:{}", link.port),
+            (LinkKind::Wireguard, false) => format!("wireguard_blocked:{}", link.port),
+            (LinkKind::Wireguard, true) => format!("wireguard6_blocked:{}", link.port),
         })
     }
 }
@@ -515,7 +533,10 @@ pub async fn check_kind(hub: &Hub, server: &str, kind: LinkKind, v6: bool) -> Re
             return Err(format!("old_agent_vxlan:{server}:{version}"));
         }
     }
-    if matches!(kind, LinkKind::Ipip | LinkKind::Geneve) {
+    if matches!(
+        kind,
+        LinkKind::Ipip | LinkKind::Geneve | LinkKind::Wireguard
+    ) {
         let version = version_of();
         if !crate::pair::version_at_least(&version, NETKIND_SINCE) {
             return Err(format!("old_agent_{}:{server}:{version}", kind.as_str()));
@@ -534,6 +555,8 @@ pub async fn check_kind(hub: &Hub, server: &str, kind: LinkKind, v6: bool) -> Re
         (LinkKind::Ipip, true) if !status.ipip6 => Err(format!("no_ipip6:{server}")),
         (LinkKind::Geneve, false) if !status.geneve => Err(format!("no_geneve:{server}")),
         (LinkKind::Geneve, true) if !status.geneve6 => Err(format!("no_geneve6:{server}")),
+        // WireGuard uses one kernel module for IPv4 and IPv6, so one capability flag covers both.
+        (LinkKind::Wireguard, _) if !status.wireguard => Err(format!("no_wireguard:{server}")),
         _ => Ok(()),
     }
 }
@@ -831,6 +854,10 @@ mod tests {
             mtu: 0,
             mtu_how: String::new(),
             ipv6: false,
+            wg_priv_a: String::new(),
+            wg_pub_a: String::new(),
+            wg_priv_b: String::new(),
+            wg_pub_b: String::new(),
         }
     }
 

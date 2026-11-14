@@ -45,6 +45,9 @@ tar = "0.4"
 tower = { version = "0.5", features = ["util"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+# WireGuard key generation (Curve25519/X25519). `static_secrets` exposes the raw private
+# scalar, which `wg` needs; we clamp it ourselves so a stored key matches `wg genkey`.
+x25519-dalek = { version = "2", default-features = false, features = ["static_secrets"] }
 
 [dev-dependencies]
 tempfile = "3"
