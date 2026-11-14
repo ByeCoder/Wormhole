@@ -1,4 +1,4 @@
-# Private networks (GRE and VXLAN)
+# Private networks (GRE, VXLAN, IPIP, Geneve and WireGuard)
 
 The panel can join your servers into a **private network**: each pair gets a GRE or VXLAN link with
 private addresses (`10.77.0.1`, `10.77.0.2`, ...) that the panel hands out so that **no two are
@@ -40,6 +40,51 @@ Each VXLAN link has one peer: its interface sends everything to the other server
 address, so nothing is flooded and no multicast is needed. Its **VNI** (the number that tells
 VXLAN links apart) is chosen by the panel so that no two VXLAN links of a server share one: the
 kernel takes a VNI once per port on a server, whoever the other end is.
+
+## IPIP and Geneve
+
+Two more link kinds, chosen the same way and carrying the same private IPv4 `/30`. Both need
+Wormhole **1.2.0** on both servers.
+
+| | IPIP | Geneve |
+|---|---|---|
+| On the wire | IP protocol 4 (IPv4 in IPv4) | UDP datagrams to one port (6081 unless you pick another) |
+| Added per packet | 20 bytes (MTU 1480) | 50 bytes (MTU 1450) |
+| Over IPv6 | `ip6tnl` mode ipip6: 40 bytes (MTU 1460) | 70 bytes (MTU 1430) |
+| Passes where | protocol 4 is let through | UDP to that port is let through |
+| Kernel module | `ipip` (`ip6_tunnel` over IPv6) | `geneve` |
+
+**IPIP** is the lightest link: plain IPv4-in-IPv4 with no key and no port, so it adds only the
+20-byte outer header. Use it where IP protocol 4 is forwarded (it, like GRE, is a distinct IP
+protocol some providers drop). There is one IPIP link per server pair — with no key or port there
+is nothing to tell two apart.
+
+**Geneve** is VXLAN's IETF-standard cousin: the same idea (Ethernet frames in UDP datagrams to
+one peer, a 24-bit VNI the panel assigns per port), with the standardised Geneve header on UDP
+port 6081 by default. Use it where VXLAN would work but you want the standard header, or to get
+through a filter that treats the two differently. If one port is blocked, make another network on
+another port.
+
+## WireGuard
+
+An **encrypted** private link, where the others are plain. Needs Wormhole **1.2.0** on both
+servers, plus the `wireguard` kernel module and the `wg` tool (most modern distributions have
+both; a container or some VPS types may not).
+
+- **On the wire:** UDP to one port (51820 unless you pick another), 60 bytes per packet (MTU
+  1440; over IPv6, 80 bytes, MTU 1420). Passes wherever that UDP port is let through.
+- **Keys are automatic.** When the panel makes a WireGuard network's link it generates a
+  Curve25519 key pair for **each** end (the same kind `wg genkey` makes), stores them, and hands
+  each server only its own private key and the other end's public key. Nothing is typed by hand,
+  and a private key is written to a `0600` file on its own server just long enough for `wg set`
+  to read it, then removed — it never travels to the other side or to the browser.
+- **The carrier is encrypted, so the tunnel over it rides inside WireGuard's own encryption** on
+  top of Wormhole's. That costs a little CPU and the 60-byte header, in return for a link that is
+  private and authenticated by itself. Use it when the path between the two servers is not trusted
+  and you want the private network encrypted, not only the tunnels over it.
+
+Like the others it carries the same private IPv4 `/30`; the panel sets the one peer, its endpoint
+and the single allowed address, so the link only ever carries this network's traffic.
 
 ## Over IPv6
 

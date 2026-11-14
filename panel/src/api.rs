@@ -2027,6 +2027,9 @@ async fn network_create(
             let how = match n.kind {
                 LinkKind::Gre => "GRE".to_owned(),
                 LinkKind::Vxlan => format!("VXLAN, UDP {}", n.port),
+                LinkKind::Ipip => "IPIP".to_owned(),
+                LinkKind::Geneve => format!("Geneve, UDP {}", n.port),
+                LinkKind::Wireguard => format!("WireGuard, UDP {}", n.port),
             };
             audit(
                 &state,

@@ -12,6 +12,7 @@ fn params(key: u8) -> KcpParams {
         config: KcpConfig::default(),
         key: [key; 32],
         carrier: CarrierKind::Udp,
+        spoof: None,
     }
 }
 
@@ -272,6 +273,17 @@ fn params_paqet(key: u8) -> KcpParams {
         config: KcpConfig::default(),
         key: [key; 32],
         carrier: CarrierKind::Paqet,
+        spoof: None,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn params_icmp(key: u8) -> KcpParams {
+    KcpParams {
+        config: KcpConfig::default(),
+        key: [key; 32],
+        carrier: CarrierKind::Icmp,
+        spoof: None,
     }
 }
 
@@ -279,6 +291,101 @@ fn params_paqet(key: u8) -> KcpParams {
 fn paqet_uses_its_own_packet_key() {
     let psk = Psk::new("paqet-key-separation-test");
     assert_ne!(psk.subkey(KEY_CONTEXT), psk.subkey(PAQET_KEY_CONTEXT));
+}
+
+#[test]
+fn icmp_uses_its_own_packet_key() {
+    let psk = Psk::new("icmp-key-separation-test");
+    assert_ne!(psk.subkey(KEY_CONTEXT), psk.subkey(ICMP_KEY_CONTEXT));
+    assert_ne!(psk.subkey(PAQET_KEY_CONTEXT), psk.subkey(ICMP_KEY_CONTEXT));
+}
+
+fn params_dns(key: u8) -> KcpParams {
+    KcpParams {
+        config: KcpConfig::default(),
+        key: [key; 32],
+        carrier: CarrierKind::Dns,
+        spoof: None,
+    }
+}
+
+#[test]
+fn dns_uses_its_own_packet_key() {
+    let psk = Psk::new("dns-key-separation-test");
+    assert_ne!(psk.subkey(KEY_CONTEXT), psk.subkey(DNS_KEY_CONTEXT));
+    assert_ne!(psk.subkey(ICMP_KEY_CONTEXT), psk.subkey(DNS_KEY_CONTEXT));
+}
+
+/// The dns carrier over a real UDP socket on loopback. No raw socket or root needed, so
+/// this always runs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dns_round_trip_over_udp() {
+    let l = KcpListener::bind("127.0.0.1:0", &params_dns(1), &tuning())
+        .await
+        .expect("bound");
+    let addr = l.local_addr().unwrap().to_string();
+    let dialer = KcpDialer::new(&addr, &params_dns(1), &tuning());
+    let client = tokio::time::timeout(Duration::from_secs(5), dialer.dial())
+        .await
+        .expect("dialed in time")
+        .expect("dialed");
+    let server = accept(&l).await;
+
+    let (client_datagrams, server_datagrams) = (
+        client.datagrams().expect("datagram side"),
+        server.datagrams().expect("datagram side"),
+    );
+    assert!(client_datagrams.send(b"dns datagram", false));
+    let datagram = tokio::time::timeout(Duration::from_secs(5), server_datagrams.recv())
+        .await
+        .expect("datagram in time")
+        .expect("stream open");
+    assert_eq!(&datagram[..], b"dns datagram");
+
+    echo(server);
+    let got = tokio::time::timeout(Duration::from_secs(20), round_trip(client, b"over dns"))
+        .await
+        .expect("round trip in time")
+        .unwrap();
+    assert_eq!(got, b"over dns");
+}
+
+/// A real raw ICMP socket on loopback. Root (or CAP_NET_RAW) and an opt-in are needed:
+/// `WORMHOLE_ICMP_IT=1 cargo test --lib --features kcp icmp_round_trip`.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn icmp_round_trip_over_raw_ipv4() {
+    if std::env::var_os("WORMHOLE_ICMP_IT").is_none() {
+        return;
+    }
+    let l = KcpListener::bind("127.0.0.1:0", &params_icmp(1), &tuning())
+        .await
+        .expect("raw socket: run the test as root or with CAP_NET_RAW");
+    let addr = l.local_addr().unwrap().to_string();
+    let dialer = KcpDialer::new(&addr, &params_icmp(1), &tuning());
+    let client = tokio::time::timeout(Duration::from_secs(5), dialer.dial())
+        .await
+        .expect("dialed in time")
+        .expect("raw socket: run the test as root or with CAP_NET_RAW");
+    let server = accept(&l).await;
+
+    let (client_datagrams, server_datagrams) = (
+        client.datagrams().expect("datagram side"),
+        server.datagrams().expect("datagram side"),
+    );
+    assert!(client_datagrams.send(b"icmp datagram", false));
+    let datagram = tokio::time::timeout(Duration::from_secs(5), server_datagrams.recv())
+        .await
+        .expect("datagram in time")
+        .expect("stream open");
+    assert_eq!(&datagram[..], b"icmp datagram");
+
+    echo(server);
+    let got = tokio::time::timeout(Duration::from_secs(20), round_trip(client, b"raw icmp"))
+        .await
+        .expect("round trip in time")
+        .unwrap();
+    assert_eq!(got, b"raw icmp");
 }
 
 /// A real raw IPv4 socket on loopback. Root (or CAP_NET_RAW) and an opt-in are needed:

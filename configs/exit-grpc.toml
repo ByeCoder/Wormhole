@@ -1,0 +1,15 @@
+# Exit side (abroad), reverse mode over grpc. Pair: entry-grpc.toml.
+#
+# `remote` is the entry side's gRPC endpoint (through its CDN/proxy, or directly for a
+# test). A stream transport, so nothing privileged is needed.
+role = "exit"
+mode = "reverse"
+profile = "balanced"
+
+[tunnel]
+transport = "grpc"
+remote = "ENTRY_SERVER_IP:2096"
+token = "CHANGE-ME-run-wormhole-token"
+
+[log]
+level = "info"

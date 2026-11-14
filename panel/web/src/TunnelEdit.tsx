@@ -69,6 +69,7 @@ export function TunnelEdit({ tunnel, servers, preset, onBack }: { tunnel: Tunnel
   const [wsMode, setWsMode] = useState<WsMode>("websocket");
   const [wsHost, setWsHost] = useState("");
   const [sni, setSni] = useState("");
+  const [stHandshake, setStHandshake] = useState("");
   const [pool, setPool] = useState<number | undefined>();
   const [ports, setPorts] = useState("");
   const [protocol, setProtocol] = useState("tcp");
@@ -150,6 +151,7 @@ export function TunnelEdit({ tunnel, servers, preset, onBack }: { tunnel: Tunnel
         const real = acc.tls_cert && acc.tls_key ? { cert: acc.tls_cert, key: acc.tls_key } : null;
         // With a real certificate the server name is the certificate's own (not one to edit).
         setSni(real ? "" : (dia.tls_sni ?? ""));
+        setStHandshake(dia.shadowtls_handshake ?? "");
         setPool(a.pool ?? b.pool);
         const list = a.forwards;
         setPorts(list.map((f) => (portOf(f.listen) === portOf(f.target) ? portOf(f.listen) : `${portOf(f.listen)}=${portOf(f.target)}`)).join(", "));
@@ -240,8 +242,8 @@ export function TunnelEdit({ tunnel, servers, preset, onBack }: { tunnel: Tunnel
     mode,
     transport: joinTransport(transport, muxOn).core,
     profile,
-    // Paqet listens on every IPv4 address (the panel gives an older listening agent its own one).
-    listen: `${transport === "paqet" || transport === "spoof" ? "0.0.0.0" : listenHost}:${listenPort}`,
+    // Paqet, spoof and icmp listen on every IPv4 address (the panel gives an older paqet listening agent its own one).
+    listen: `${transport === "paqet" || transport === "spoof" || transport === "icmp" ? "0.0.0.0" : listenHost}:${listenPort}`,
     dial: `${dialHost.includes(":") && !dialHost.startsWith("[") ? `[${dialHost}]` : dialHost}:${listenPort}`,
     network: netId || undefined,
     pool,
@@ -249,6 +251,7 @@ export function TunnelEdit({ tunnel, servers, preset, onBack }: { tunnel: Tunnel
     ws_mode: wsModeField(transport, wsMode),
     ws_host: isWs && wsHost.trim() ? wsHost.trim() : undefined,
     tls_sni: transport === "wss" && tls.mode === "self" && sni.trim() ? sni.trim() : undefined,
+    shadowtls_handshake: transport === "shadowtls" && stHandshake.trim() ? stHandshake.trim() : undefined,
     mux: muxSpecOf(mux, transport, muxOn),
     kcp: kcpSpecOf(kcp, transport, profile),
     spoof: spoofOn ? spoofToPair(spoof).spoof : undefined,
@@ -275,7 +278,7 @@ export function TunnelEdit({ tunnel, servers, preset, onBack }: { tunnel: Tunnel
   // Dialed at an IPv6 address, the accepting side listens on every address, IPv6 too (on every IPv4 one it
   // would never answer).
   useEffect(() => {
-    if (transport !== "paqet" && !netId && isV6(dialHost) && listenHost === "0.0.0.0") setListenHost("[::]");
+    if (transport !== "paqet" && transport !== "icmp" && !netId && isV6(dialHost) && listenHost === "0.0.0.0") setListenHost("[::]");
   }, [dialHost, netId, listenHost, transport]);
 
   // Paqet runs over the public IPv4 addresses only: a private network is let go (back to the public
@@ -284,7 +287,7 @@ export function TunnelEdit({ tunnel, servers, preset, onBack }: { tunnel: Tunnel
   // (Once, when Paqet is chosen, the tunnel is loaded or the accepting server changes: an IPv6 address typed
   // afterwards is not replaced under the cursor, it gets the IPv4-only error.)
   useEffect(() => {
-    if (transport !== "paqet" || !netReady) return;
+    if ((transport !== "paqet" && transport !== "icmp") || !netReady) return;
     if (netId) {
       // Back to the public addresses, at the accepting server's IPv4 one.
       setNetId("");
@@ -315,7 +318,7 @@ export function TunnelEdit({ tunnel, servers, preset, onBack }: { tunnel: Tunnel
     if (moved && [entry, exit].some((id) => !online(id))) return t("te.moveOffline");
     if (!/^\d{1,5}$/.test(listenPort) || +listenPort < 1 || +listenPort > 65535) return t("wz.port", { server: serverName(acceptor) });
     if (!dialHost.trim() && !netId) return t("wz.dial", { server: serverName(acceptor), other: serverName(dialer) });
-    if (transport === "paqet" && isV6(dialHost)) return t("paqet.ip");
+    if ((transport === "paqet" || transport === "icmp") && isV6(dialHost)) return t("paqet.ip");
     if (isWs && !wsPath.startsWith("/")) return t("wz.wsPath");
     if (transport === "wss" && !tlsReady(tls)) return t(tls.mode === "own" ? "tls.needOwn" : "tls.needCert");
     if (!cipherReady(enc, transport, encAck)) return t("enc.needAck");
@@ -476,22 +479,22 @@ export function TunnelEdit({ tunnel, servers, preset, onBack }: { tunnel: Tunnel
           <fieldset className="card edit-sec" disabled={locked}>
             <legend>{t("te.where")}</legend>
             <p className="muted small">{t("wz.lead3", { acceptor: serverName(acceptor), dialer: serverName(dialer) })}</p>
-            <GreChoice value={netId} onChange={chooseNetwork} networks={networks} links={links} entry={entry} exit={exit} acceptor={acceptor} port={listenPort} serverName={serverName} blocked={transport === "paqet" ? t("paqet.noNetwork") : undefined} />
+            <GreChoice value={netId} onChange={chooseNetwork} networks={networks} links={links} entry={entry} exit={exit} acceptor={acceptor} port={listenPort} serverName={serverName} blocked={transport === "icmp" ? t("icmp.noNetwork") : transport === "paqet" ? t("paqet.noNetwork") : undefined} />
             {!netId && loadedHost !== null && !!linkWithAddress(links, loadedHost) && <p className="help warn-text">{t("te.greOff")}</p>}
             <div className="grid-2">
               <div className="field">
                 <label htmlFor="te-port">{t("wz.port", { server: serverName(acceptor) })}</label>
                 <input className="text mono" id="te-port" dir="ltr" inputMode="numeric" value={listenPort} onChange={(e) => setListenPort(e.target.value.trim())} />
                 {transport === "auto" && <span className="help">{t("wz.autoPorts", { server: serverName(acceptor), tcp: listenPort, udp: listenPort, ws: String(+listenPort + 1) })}</span>}
-                {(transport === "quic" || transport === "kcp") && <span className="help">{t("wz.portUdp")}</span>}
+                {(transport === "quic" || transport === "kcp" || transport === "dns") && <span className="help">{t("wz.portUdp")}</span>}
               </div>
               <div className="field" hidden={!!netId}>
                 <label htmlFor="te-dial">{t("wz.dial", { server: serverName(acceptor), other: serverName(dialer) })}</label>
                 <input className="text mono" id="te-dial" dir="ltr" value={dialHost} placeholder="203.0.113.5" onChange={(e) => setDialHost(e.target.value.trim())} />
-                {transport === "paqet" && <span className="help">{t("paqet.ipv4Only")}</span>}
-                {(transport === "paqet" ? ipv4Choices : choices).length > 0 && (
+                {(transport === "paqet" || transport === "icmp") && <span className="help">{transport === "icmp" ? t("icmp.ipv4Only") : t("paqet.ipv4Only")}</span>}
+                {((transport === "paqet" || transport === "icmp") ? ipv4Choices : choices).length > 0 && (
                   <span className="addr-chips">
-                    {(transport === "paqet" ? ipv4Choices : choices).map((a) => (
+                    {((transport === "paqet" || transport === "icmp") ? ipv4Choices : choices).map((a) => (
                       <button key={a} type="button" className={`pchip as-btn ${a === dialHost ? "on" : ""}`} dir="ltr" onClick={() => setDialHost(a)}>
                         {a}
                       </button>
@@ -560,7 +563,7 @@ export function TunnelEdit({ tunnel, servers, preset, onBack }: { tunnel: Tunnel
                   </More>
                 )}
               </div>
-              {(isWs || (transport === "tcp" && !muxOn)) && (
+              {(isWs || (transport === "tcp" && !muxOn) || transport === "shadowtls") && (
                 <div className="more-group">
                   <h4 className="more-h">{t("te.where")}</h4>
                   <div className="grid-2">
@@ -582,6 +585,13 @@ export function TunnelEdit({ tunnel, servers, preset, onBack }: { tunnel: Tunnel
                         <label htmlFor="te-sni">{t("wz.sni")}</label>
                         <input className="text mono" id="te-sni" dir="ltr" value={sni} placeholder="www.example.com" onChange={(e) => setSni(e.target.value.trim())} />
                         <span className="help">{t("wz.sniHelp")}</span>
+                      </div>
+                    )}
+                    {transport === "shadowtls" && (
+                      <div className="field">
+                        <label htmlFor="te-sths">{t("wz.shadowtls.handshake")}</label>
+                        <input className="text mono" id="te-sths" dir="ltr" value={stHandshake} placeholder="www.microsoft.com:443" onChange={(e) => setStHandshake(e.target.value.trim())} />
+                        <span className="help">{t("wz.shadowtls.handshakeHelp")}</span>
                       </div>
                     )}
                     {transport === "tcp" && !muxOn && (

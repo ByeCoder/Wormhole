@@ -16,7 +16,7 @@ use serde::Serialize;
 use crate::auth::now;
 use crate::config::random_hex;
 use crate::db::Db;
-use crate::net::{VNI_MAX, VXLAN_PORT};
+use crate::net::{GENEVE_PORT, VNI_MAX, VXLAN_PORT, WG_PORT};
 use crate::wire::LinkKind;
 
 /// An IPv4 network: the address of its first host bit pattern, and how many bits are fixed.
@@ -146,6 +146,17 @@ pub struct Link {
     pub mtu_how: String,
     /// It runs between its servers' IPv6 addresses, not their IPv4 ones.
     pub ipv6: bool,
+    /// WireGuard only: each end's key pair (private, public), base64, made by the panel. Kept
+    /// out of anything serialized to the browser (`skip`); the private keys stay in the panel
+    /// and go only to the agent that owns that end. Empty for every other kind.
+    #[serde(skip)]
+    pub wg_priv_a: String,
+    #[serde(skip)]
+    pub wg_pub_a: String,
+    #[serde(skip)]
+    pub wg_priv_b: String,
+    #[serde(skip)]
+    pub wg_pub_b: String,
 }
 
 /// Which servers a link joins, and how a set of servers is joined.
@@ -232,8 +243,14 @@ impl Networks {
         let port = match kind {
             LinkKind::Gre if port != 0 => bail!("bad_port"),
             LinkKind::Gre => 0,
+            LinkKind::Ipip if port != 0 => bail!("bad_port"),
+            LinkKind::Ipip => 0,
             LinkKind::Vxlan if port == 0 => VXLAN_PORT,
             LinkKind::Vxlan => port,
+            LinkKind::Geneve if port == 0 => GENEVE_PORT,
+            LinkKind::Geneve => port,
+            LinkKind::Wireguard if port == 0 => WG_PORT,
+            LinkKind::Wireguard => port,
         };
         let pool = Cidr::parse(cidr)?;
         check_pool(pool)?;
@@ -307,7 +324,8 @@ impl Networks {
         let conn = self.db.conn();
         let mut stmt = conn.prepare(
             "SELECT l.id, l.network, l.a, l.b, l.subnet, l.addr_a, l.addr_b, l.gre_key, l.ifname,
-                    l.created, n.kind, n.port, l.mtu, l.mtu_how, l.ipv6
+                    l.created, n.kind, n.port, l.mtu, l.mtu_how, l.ipv6,
+                    l.wg_priv_a, l.wg_pub_a, l.wg_priv_b, l.wg_pub_b
              FROM net_links l JOIN networks n ON n.id = l.network
              WHERE (?1 IS NULL OR l.network = ?1) ORDER BY l.created, l.id",
         )?;
@@ -328,6 +346,10 @@ impl Networks {
                 mtu: r.get(12)?,
                 mtu_how: r.get(13)?,
                 ipv6: r.get(14)?,
+                wg_priv_a: r.get(15)?,
+                wg_pub_a: r.get(16)?,
+                wg_priv_b: r.get(17)?,
+                wg_pub_b: r.get(18)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -415,8 +437,12 @@ impl Networks {
             // server, whoever the peer is); it is also new for the pair, as the schema wants.
             let taken: HashSet<u32> = {
                 let sql = match kind {
-                    LinkKind::Gre => "SELECT gre_key FROM net_links WHERE a = ?1 AND b = ?2",
-                    LinkKind::Vxlan => {
+                    // IPIP and WireGuard carry no VNI; a per-pair key keeps the schema's
+                    // (a, b, gre_key) unique, and the agent is sent 0 (see `spec_for`).
+                    LinkKind::Gre | LinkKind::Ipip | LinkKind::Wireguard => {
+                        "SELECT gre_key FROM net_links WHERE a = ?1 AND b = ?2"
+                    }
+                    LinkKind::Vxlan | LinkKind::Geneve => {
                         "SELECT gre_key FROM net_links WHERE a IN (?1, ?2) OR b IN (?1, ?2)"
                     }
                 };
@@ -440,6 +466,16 @@ impl Networks {
                 }
                 id = random_hex(6)?;
             }
+            // WireGuard: the panel makes both ends' key pairs now, once, so no key is ever
+            // typed. The private keys are stored and later handed only to the agent that owns
+            // that end (see `spec_for`); they are kept out of anything sent to the browser.
+            let (wg_priv_a, wg_pub_a, wg_priv_b, wg_pub_b) = if kind == LinkKind::Wireguard {
+                let ka = crate::wgkey::generate()?;
+                let kb = crate::wgkey::generate()?;
+                (ka.private, ka.public, kb.private, kb.public)
+            } else {
+                Default::default()
+            };
             let link = Link {
                 ifname: format!("kz-{}", &id[..5]),
                 id,
@@ -460,13 +496,19 @@ impl Networks {
                 mtu: 0,
                 mtu_how: String::new(),
                 ipv6,
+                wg_priv_a,
+                wg_pub_a,
+                wg_priv_b,
+                wg_pub_b,
             };
             tx.execute(
-                "INSERT INTO net_links (id, network, a, b, subnet, addr_a, addr_b, gre_key, ifname, created, ipv6)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                "INSERT INTO net_links (id, network, a, b, subnet, addr_a, addr_b, gre_key, ifname, created, ipv6,
+                                        wg_priv_a, wg_pub_a, wg_priv_b, wg_pub_b)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
                 params![
                     link.id, link.network, link.a, link.b, link.subnet, link.addr_a, link.addr_b,
-                    link.gre_key, link.ifname, link.created, link.ipv6
+                    link.gre_key, link.ifname, link.created, link.ipv6,
+                    link.wg_priv_a, link.wg_pub_a, link.wg_priv_b, link.wg_pub_b
                 ],
             )?;
             made.push(link);

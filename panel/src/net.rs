@@ -36,6 +36,16 @@ pub const OLD_GRE_MTU: u32 = 1476;
 /// VXLAN adds 50 (outer IPv4, UDP, VXLAN and the inner Ethernet header).
 pub const VXLAN_MTU: u32 = 1450;
 
+/// IPIP adds only the outer IPv4 header (20): the lightest encapsulation.
+pub const IPIP_MTU: u32 = 1480;
+
+/// Geneve adds 50, as VXLAN does (outer IPv4, UDP, the 8-byte Geneve header with no
+/// options, and the inner Ethernet header).
+pub const GENEVE_MTU: u32 = 1450;
+
+/// WireGuard adds 60 (outer IPv4 20, UDP 8, and the 32-byte WireGuard data header).
+pub const WG_MTU: u32 = 1440;
+
 /// An IPv6 header is 20 bytes larger than an IPv4 one. (`ip6gre` is made without the
 /// 8-byte encapsulation limit option, which many networks drop.)
 pub const IPV6_EXTRA: u32 = 20;
@@ -48,6 +58,9 @@ pub fn overhead(kind: LinkKind, v6: bool) -> u32 {
     let v4 = match kind {
         LinkKind::Gre => PATH_MTU - DEFAULT_MTU,
         LinkKind::Vxlan => PATH_MTU - VXLAN_MTU,
+        LinkKind::Ipip => PATH_MTU - IPIP_MTU,
+        LinkKind::Geneve => PATH_MTU - GENEVE_MTU,
+        LinkKind::Wireguard => PATH_MTU - WG_MTU,
     };
     if v6 {
         v4 + IPV6_EXTRA
@@ -70,6 +83,13 @@ pub fn mtu_for_path(kind: LinkKind, v6: bool, path: u32) -> u32 {
 
 /// The UDP port VXLAN uses unless a network says otherwise (IANA's).
 pub const VXLAN_PORT: u16 = 4789;
+
+/// The UDP port Geneve uses unless a network says otherwise (IANA's).
+pub const GENEVE_PORT: u16 = 6081;
+
+/// The UDP port WireGuard listens on unless a network says otherwise (its usual one). Both
+/// ends of a link use the same port, each on its own server.
+pub const WG_PORT: u16 = 51820;
 
 /// The largest VNI a link may take: the very last one (2^24 - 1) is the probe's.
 pub const VNI_MAX: u32 = (1 << 24) - 2;
@@ -155,6 +175,36 @@ pub fn validate(spec: &NetSpec) -> Result<(IpAddr, IpAddr, Ipv4Addr, Ipv4Addr)> 
             }
             if spec.port == 0 {
                 bail!("a VXLAN link needs a UDP port");
+            }
+        }
+        LinkKind::Ipip => {
+            if spec.key != 0 {
+                bail!("an IPIP link has no key");
+            }
+            if spec.port != 0 {
+                bail!("an IPIP link has no port");
+            }
+        }
+        LinkKind::Geneve => {
+            if !(1..=VNI_MAX).contains(&spec.key) {
+                bail!("the Geneve VNI must be between 1 and {VNI_MAX}");
+            }
+            if spec.port == 0 {
+                bail!("a Geneve link needs a UDP port");
+            }
+        }
+        LinkKind::Wireguard => {
+            if spec.key != 0 {
+                bail!("a WireGuard link has no key field (its keys are its own)");
+            }
+            if spec.port == 0 {
+                bail!("a WireGuard link needs a UDP port");
+            }
+            if !crate::wgkey::is_key(&spec.wg_private) {
+                bail!("the WireGuard private key is missing or malformed");
+            }
+            if !crate::wgkey::is_key(&spec.wg_peer) {
+                bail!("the WireGuard peer public key is missing or malformed");
             }
         }
     }
@@ -244,6 +294,66 @@ pub fn commands(spec: &NetSpec) -> Result<Vec<Vec<String>>> {
             s("ttl"),
             s("64"),
         ],
+        // IPv4 in IPv4, no key or port: the lightest tunnel.
+        (LinkKind::Ipip, false) => vec![
+            s("link"),
+            s("add"),
+            spec.name.clone(),
+            s("type"),
+            s("ipip"),
+            s("local"),
+            local.to_string(),
+            s("remote"),
+            remote.to_string(),
+            s("ttl"),
+            s("64"),
+        ],
+        // IPv4 inside IPv6 (`ip6tnl` mode ipip6), with `encaplimit none` as ip6gre uses,
+        // so the kernel adds no destination option that providers drop.
+        (LinkKind::Ipip, true) => vec![
+            s("link"),
+            s("add"),
+            spec.name.clone(),
+            s("type"),
+            s("ip6tnl"),
+            s("mode"),
+            s("ipip6"),
+            s("local"),
+            local.to_string(),
+            s("remote"),
+            remote.to_string(),
+            s("hoplimit"),
+            s("64"),
+            s("encaplimit"),
+            s("none"),
+        ],
+        // WireGuard: just the netdev here. Its keys, peer, listen port and endpoint are set
+        // with `wg set` (see `Net::wg_configure`), which the panel runs between this and the
+        // addressing below, because the private key goes in through a file, not the command
+        // line. The same netdev over IPv4 or IPv6; only the endpoint address differs.
+        (LinkKind::Wireguard, _) => vec![
+            s("link"),
+            s("add"),
+            spec.name.clone(),
+            s("type"),
+            s("wireguard"),
+        ],
+        // Like VXLAN, one peer, the IETF-standard header. The same over IPv6.
+        (LinkKind::Geneve, _) => vec![
+            s("link"),
+            s("add"),
+            spec.name.clone(),
+            s("type"),
+            s("geneve"),
+            s("id"),
+            spec.key.to_string(),
+            s("remote"),
+            remote.to_string(),
+            s("dstport"),
+            spec.port.to_string(),
+            s("ttl"),
+            s("64"),
+        ],
     };
     Ok(vec![
         make,
@@ -262,6 +372,37 @@ pub fn commands(spec: &NetSpec) -> Result<Vec<Vec<String>>> {
             spec.mtu.to_string(),
             s("up"),
         ],
+    ])
+}
+
+/// The `wg set` arguments for a WireGuard link: its private key (read from `key_path`, not
+/// put on the command line), the listen port, and the one peer with its public key, the
+/// endpoint to reach it at, and the single host address allowed over the tunnel. `None` for
+/// any other kind. Runs after the netdev is made and before it is addressed.
+pub fn wg_args(spec: &NetSpec, key_path: &str) -> Option<Vec<String>> {
+    if spec.kind != LinkKind::Wireguard {
+        return None;
+    }
+    let (_, remote, _, peer) = validate(spec).ok()?;
+    let endpoint = if remote.is_ipv6() {
+        format!("[{remote}]:{}", spec.port)
+    } else {
+        format!("{remote}:{}", spec.port)
+    };
+    let s = |x: &str| x.to_owned();
+    Some(vec![
+        s("set"),
+        spec.name.clone(),
+        s("private-key"),
+        key_path.to_owned(),
+        s("listen-port"),
+        spec.port.to_string(),
+        s("peer"),
+        spec.wg_peer.clone(),
+        s("allowed-ips"),
+        format!("{peer}/32"),
+        s("endpoint"),
+        endpoint,
     ])
 }
 
@@ -368,14 +509,51 @@ impl Net {
             .exec
             .run("ip", vec!["link".into(), "del".into(), spec.name.clone()])
             .await;
+        if let Err(e) = self.apply_steps(spec, cmds).await {
+            let _ = self
+                .exec
+                .run("ip", vec!["link".into(), "del".into(), spec.name.clone()])
+                .await;
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    /// Runs the link's commands in order. A WireGuard link has a `wg set` step between making
+    /// the netdev (the first command) and addressing it, to load its keys, peer and port.
+    async fn apply_steps(&self, spec: &NetSpec, cmds: Vec<Vec<String>>) -> Result<()> {
+        let mut cmds = cmds.into_iter();
+        if let Some(first) = cmds.next() {
+            self.ip(first).await?;
+        }
+        if spec.kind == LinkKind::Wireguard {
+            self.wg_configure(spec).await?;
+        }
         for cmd in cmds {
-            if let Err(e) = self.ip(cmd).await {
-                let _ = self
-                    .exec
-                    .run("ip", vec!["link".into(), "del".into(), spec.name.clone()])
-                    .await;
-                return Err(e);
-            }
+            self.ip(cmd).await?;
+        }
+        Ok(())
+    }
+
+    /// Loads a WireGuard link's private key, peer and listen port with `wg set`. The private
+    /// key is written to a `0600` file and passed by path (never on the command line, where
+    /// it would show in the process list), then removed.
+    async fn wg_configure(&self, spec: &NetSpec) -> Result<()> {
+        let dir = self
+            .state
+            .as_ref()
+            .and_then(|p| p.parent())
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir);
+        let key_path = dir.join(format!(".{}.wgkey", spec.name));
+        crate::agent::write_private(&key_path, spec.wg_private.as_bytes())?;
+        let args = wg_args(spec, &key_path.to_string_lossy())
+            .ok_or_else(|| anyhow::anyhow!("not a WireGuard link"))?;
+        let result = self.exec.run("wg", args.clone()).await;
+        let _ = std::fs::remove_file(&key_path);
+        let (ok, text) = result?;
+        if !ok {
+            bail!("wg set {} failed: {}", spec.name, text.trim());
         }
         Ok(())
     }
@@ -681,6 +859,101 @@ impl Net {
                 ],
             )
             .await;
+        let (ipip, ipip_reason) = self
+            .probe(
+                "kz-probei",
+                &[
+                    "link",
+                    "add",
+                    "kz-probei",
+                    "type",
+                    "ipip",
+                    "local",
+                    "192.0.2.1",
+                    "remote",
+                    "192.0.2.2",
+                    "ttl",
+                    "64",
+                ],
+            )
+            .await;
+        let (ipip6, ipip6_reason) = self
+            .probe(
+                "kz-probei6",
+                &[
+                    "link",
+                    "add",
+                    "kz-probei6",
+                    "type",
+                    "ip6tnl",
+                    "mode",
+                    "ipip6",
+                    "local",
+                    "2001:db8::1",
+                    "remote",
+                    "2001:db8::2",
+                    "encaplimit",
+                    "none",
+                ],
+            )
+            .await;
+        let (geneve, geneve_reason) = self
+            .probe(
+                "kz-probeg",
+                &[
+                    "link",
+                    "add",
+                    "kz-probeg",
+                    "type",
+                    "geneve",
+                    "id",
+                    "16777215",
+                    "remote",
+                    "192.0.2.2",
+                    "dstport",
+                    "6081",
+                ],
+            )
+            .await;
+        let (geneve6, geneve6_reason) = self
+            .probe(
+                "kz-probeg6",
+                &[
+                    "link",
+                    "add",
+                    "kz-probeg6",
+                    "type",
+                    "geneve",
+                    "id",
+                    "16777215",
+                    "remote",
+                    "2001:db8::2",
+                    "dstport",
+                    "6082",
+                ],
+            )
+            .await;
+        // WireGuard needs both the kernel module (the netdev can be made) and the `wg` tool
+        // (to load keys). The probe makes a keyless netdev; then `wg --version` checks the
+        // tool. An IP is not needed to make the device, so documentation ones are not used.
+        let (wg_dev, wg_dev_reason) = self
+            .probe(
+                "kz-probew",
+                &["link", "add", "kz-probew", "type", "wireguard"],
+            )
+            .await;
+        let (wireguard, wireguard_reason) = if !wg_dev {
+            (false, wg_dev_reason)
+        } else {
+            match self.exec.run("wg", vec!["--version".to_owned()]).await {
+                Ok((true, _)) => (true, None),
+                Ok((false, t)) => (
+                    false,
+                    Some(format!("the wg tool is missing ({})", t.trim())),
+                ),
+                Err(e) => (false, Some(format!("the wg tool is missing ({e:#})"))),
+            }
+        };
         let links = self
             .load()
             .link
@@ -708,6 +981,16 @@ impl Net {
             gre6_reason,
             vxlan6,
             vxlan6_reason,
+            ipip,
+            ipip_reason,
+            ipip6,
+            ipip6_reason,
+            geneve,
+            geneve_reason,
+            geneve6,
+            geneve6_reason,
+            wireguard,
+            wireguard_reason,
             links,
         }
     }
@@ -731,6 +1014,8 @@ mod tests {
             mtu: DEFAULT_MTU,
             kind: LinkKind::Gre,
             port: 0,
+            wg_private: String::new(),
+            wg_peer: String::new(),
         }
     }
 
@@ -808,6 +1093,161 @@ mod tests {
             .contains("dstport 8472"));
     }
 
+    fn ipip() -> NetSpec {
+        NetSpec {
+            key: 0,
+            mtu: IPIP_MTU,
+            kind: LinkKind::Ipip,
+            port: 0,
+            ..spec()
+        }
+    }
+
+    fn geneve() -> NetSpec {
+        NetSpec {
+            key: 7,
+            mtu: GENEVE_MTU,
+            kind: LinkKind::Geneve,
+            port: GENEVE_PORT,
+            ..spec()
+        }
+    }
+
+    #[test]
+    fn an_ipip_link_makes_a_keyless_portless_interface() {
+        let lines: Vec<String> = commands(&ipip())
+            .unwrap()
+            .iter()
+            .map(|c| c.join(" "))
+            .collect();
+        assert_eq!(
+            lines,
+            vec![
+                "link add kz-a1b2c type ipip local 203.0.113.5 remote 198.51.100.7 ttl 64",
+                "addr add 10.77.0.1/30 dev kz-a1b2c",
+                "link set kz-a1b2c mtu 1480 up",
+            ]
+        );
+        // A key or a port on an IPIP link is refused.
+        assert!(commands(&NetSpec { key: 1, ..ipip() }).is_err());
+        assert!(commands(&NetSpec {
+            port: 6081,
+            ..ipip()
+        })
+        .is_err());
+    }
+
+    #[test]
+    fn a_geneve_link_makes_one_peer_interface_on_its_port() {
+        let lines: Vec<String> = commands(&geneve())
+            .unwrap()
+            .iter()
+            .map(|c| c.join(" "))
+            .collect();
+        assert_eq!(
+            lines,
+            vec![
+                "link add kz-a1b2c type geneve id 7 remote 198.51.100.7 dstport 6081 ttl 64",
+                "addr add 10.77.0.1/30 dev kz-a1b2c",
+                "link set kz-a1b2c mtu 1450 up",
+            ]
+        );
+        // Geneve needs a port and a VNI in range.
+        assert!(commands(&NetSpec {
+            port: 0,
+            ..geneve()
+        })
+        .is_err());
+        assert!(commands(&NetSpec { key: 0, ..geneve() }).is_err());
+    }
+
+    fn wireguard() -> NetSpec {
+        NetSpec {
+            key: 0,
+            mtu: WG_MTU,
+            kind: LinkKind::Wireguard,
+            port: WG_PORT,
+            wg_private: crate::wgkey::generate().unwrap().private,
+            wg_peer: crate::wgkey::generate().unwrap().public,
+            ..spec()
+        }
+    }
+
+    #[test]
+    fn a_wireguard_link_makes_a_bare_netdev_and_a_wg_set_step() {
+        let wg = wireguard();
+        // The `ip` side is just the netdev plus the addressing; no key or peer on it.
+        let lines: Vec<String> = commands(&wg).unwrap().iter().map(|c| c.join(" ")).collect();
+        assert_eq!(
+            lines,
+            vec![
+                "link add kz-a1b2c type wireguard",
+                "addr add 10.77.0.1/30 dev kz-a1b2c",
+                "link set kz-a1b2c mtu 1440 up",
+            ]
+        );
+        // The keys, peer, port and endpoint go in with `wg set`, the private key by file path.
+        let args = wg_args(&wg, "/run/x.wgkey").unwrap().join(" ");
+        assert_eq!(
+            args,
+            format!(
+                "set kz-a1b2c private-key /run/x.wgkey listen-port 51820 peer {} allowed-ips 10.77.0.2/32 endpoint 198.51.100.7:51820",
+                wg.wg_peer
+            )
+        );
+        // No `wg set` for any other kind.
+        assert!(wg_args(&geneve(), "/run/x.wgkey").is_none());
+        // A WireGuard link needs a port, no key, and two well-formed keys.
+        assert!(commands(&NetSpec {
+            port: 0,
+            ..wireguard()
+        })
+        .is_err());
+        assert!(commands(&NetSpec {
+            key: 1,
+            ..wireguard()
+        })
+        .is_err());
+        assert!(commands(&NetSpec {
+            wg_private: "bad".into(),
+            ..wireguard()
+        })
+        .is_err());
+    }
+
+    #[test]
+    fn a_wireguard_link_over_ipv6_brackets_the_endpoint() {
+        let wg = NetSpec {
+            local: "2001:db8::1".into(),
+            remote: "2001:db8::2".into(),
+            mtu: max_mtu(LinkKind::Wireguard, true),
+            ..wireguard()
+        };
+        // The netdev is the same; only the endpoint gains brackets.
+        assert_eq!(
+            commands(&wg).unwrap()[0].join(" "),
+            "link add kz-a1b2c type wireguard"
+        );
+        assert!(wg_args(&wg, "/k")
+            .unwrap()
+            .join(" ")
+            .contains("endpoint [2001:db8::2]:51820"));
+    }
+
+    #[test]
+    fn an_ipip_link_over_ipv6_is_ip6tnl_without_the_encapsulation_limit() {
+        let v6 = NetSpec {
+            local: "2001:db8::1".into(),
+            remote: "2001:db8::2".into(),
+            mtu: max_mtu(LinkKind::Ipip, true),
+            ..ipip()
+        };
+        assert_eq!(
+            commands(&v6).unwrap()[0].join(" "),
+            "link add kz-a1b2c type ip6tnl mode ipip6 local 2001:db8::1 remote 2001:db8::2 hoplimit 64 encaplimit none"
+        );
+    }
+
     fn gre6() -> NetSpec {
         NetSpec {
             local: "2001:db8:1::5".into(),
@@ -871,6 +1311,12 @@ mod tests {
         assert_eq!(overhead(LinkKind::Gre, true), 48);
         assert_eq!(overhead(LinkKind::Vxlan, true), 70);
         assert_eq!(mtu_for_path(LinkKind::Gre, true, 1400), 1352);
+        // IPIP adds only the outer header (20 over IPv4, 40 over IPv6); Geneve, like VXLAN.
+        assert_eq!(overhead(LinkKind::Ipip, false), 20);
+        assert_eq!(overhead(LinkKind::Ipip, true), 40);
+        assert_eq!(overhead(LinkKind::Geneve, false), 50);
+        assert_eq!(max_mtu(LinkKind::Ipip, false), 1480);
+        assert_eq!(max_mtu(LinkKind::Geneve, false), 1450);
     }
 
     #[test]

@@ -42,6 +42,10 @@ pub struct PairRequest {
     pub ws_mode: Option<String>,
     pub ws_host: Option<String>,
     pub tls_sni: Option<String>,
+    /// `shadowtls` only: the real site to borrow a TLS appearance from, the same on both
+    /// sides.
+    #[serde(default)]
+    pub shadowtls_handshake: Option<String>,
     /// Mux settings, the same on both sides; left out, the profile's apply.
     #[serde(default)]
     pub mux: Option<crate::wire::MuxSpec>,
@@ -164,6 +168,7 @@ impl PairRequest {
                 .then(|| self.proxy_version().map(str::to_owned))
                 .flatten(),
             tls_sni: (!accepts).then(|| self.dial_sni()).flatten(),
+            shadowtls_handshake: self.shadowtls_handshake.clone(),
             tls_pin: (!accepts && self.transport == "wss" && self.tls_cert.is_none())
                 .then(|| pin.map(str::to_owned))
                 .flatten(),
@@ -218,6 +223,31 @@ impl PairRequest {
     /// Whether this tunnel uses Paqet, which came with 2.8.0-beta.1 on both sides.
     fn needs_paqet(&self) -> bool {
         self.transport == "paqet"
+    }
+
+    /// Whether this is an `icmp` tunnel (KCP in ICMP echo over a raw socket).
+    fn needs_icmp(&self) -> bool {
+        self.transport == "icmp"
+    }
+
+    /// Whether this is a `dns` tunnel (KCP in DNS query/response over UDP).
+    fn needs_dns(&self) -> bool {
+        self.transport == "dns"
+    }
+
+    /// Whether this is a `grpc` tunnel (a tunnel stream over gRPC/HTTP-2).
+    fn needs_grpc(&self) -> bool {
+        self.transport == "grpc"
+    }
+
+    /// Whether this is an `xhttp` tunnel (the tunnel over streaming HTTP/1.1).
+    fn needs_xhttp(&self) -> bool {
+        self.transport == "xhttp"
+    }
+
+    /// Whether this is a `shadowtls` tunnel (camouflage TLS to a real site).
+    fn needs_shadowtls(&self) -> bool {
+        self.transport == "shadowtls"
     }
 
     /// A Paqet tunnel listens on every IPv4 address (`0.0.0.0`), as the other transports
@@ -328,6 +358,11 @@ impl PairRequest {
     fn require_new_enough(&self, hub: &Hub) -> Result<()> {
         let anything_new = self.needs_new_servers()
             || self.needs_paqet()
+            || self.needs_icmp()
+            || self.needs_dns()
+            || self.needs_grpc()
+            || self.needs_xhttp()
+            || self.needs_shadowtls()
             || self.chosen_encryption().is_some()
             || self.sealed()
             || self.needs_2_4().0
@@ -361,6 +396,11 @@ impl PairRequest {
         // Sealing QUIC came with 1.7: an older agent refuses a spec that has it.
         if self.sealed() && !version_at_least(version, (1, 0, 0)) {
             bail!("old_agent_obfs:{id}:{version}");
+        }
+        // Spreading over auto's transports came with 1.0.0. An older agent refuses the
+        // field (checked before the general one below, so the message names it), on either side (both get the same `[tunnel.mux]`).
+        if self.spread() && !release_at_least(version, SPREAD_SINCE) {
+            bail!("old_agent_spread:{id}:{version}");
         }
         if self.needs_new_servers() && !version_at_least(version, (1, 0, 0)) {
             bail!("old_agent:{id}:{version}");
@@ -397,11 +437,6 @@ impl PairRequest {
         {
             bail!("old_agent_cert:{id}:{version}");
         }
-        // Spreading over auto's transports came with 1.0.0. An older agent refuses the
-        // field, on either side (both get the same `[tunnel.mux]`).
-        if self.spread() && !release_at_least(version, SPREAD_SINCE) {
-            bail!("old_agent_spread:{id}:{version}");
-        }
         // The spoof transport came with 1.0.0; both sides take part.
         if self.is_spoof() && !release_at_least(version, SPOOF_SINCE) {
             bail!("old_agent_spoof:{id}:{version}");
@@ -410,6 +445,26 @@ impl PairRequest {
         // speak the same one: an older agent refuses the field.
         if self.ws_mode_field().is_some() && !release_at_least(version, WS_MODE_SINCE) {
             bail!("old_agent_wsmode:{id}:{version}");
+        }
+        // The icmp transport came with 1.2.0; both sides take part.
+        if self.needs_icmp() && !release_at_least(version, ICMP_SINCE) {
+            bail!("old_agent_icmp:{id}:{version}");
+        }
+        // The dns transport came with 1.2.0; both sides take part.
+        if self.needs_dns() && !release_at_least(version, DNS_SINCE) {
+            bail!("old_agent_dns:{id}:{version}");
+        }
+        // The grpc transport came with 1.2.0; both sides take part.
+        if self.needs_grpc() && !release_at_least(version, GRPC_SINCE) {
+            bail!("old_agent_grpc:{id}:{version}");
+        }
+        // The xhttp transport came with 1.2.0; both sides take part.
+        if self.needs_xhttp() && !release_at_least(version, XHTTP_SINCE) {
+            bail!("old_agent_xhttp:{id}:{version}");
+        }
+        // The shadowtls transport came with 1.2.0; both sides take part.
+        if self.needs_shadowtls() && !release_at_least(version, SHADOWTLS_SINCE) {
+            bail!("old_agent_shadowtls:{id}:{version}");
         }
         Ok(())
     }
@@ -563,6 +618,21 @@ const OWN_CERT_SINCE: &str = "1.0.0";
 
 /// The first release with `tunnel.ws.mode` (`httpupgrade`, and `tls` for wss).
 pub const WS_MODE_SINCE: &str = "1.1.0";
+
+/// The first release with the `icmp` transport (KCP in ICMP echo over a raw socket).
+pub const ICMP_SINCE: &str = "1.2.0";
+
+/// The first release with the `dns` transport (KCP in DNS query/response over UDP).
+pub const DNS_SINCE: &str = "1.2.0";
+
+/// The first release with the `grpc` transport (a tunnel stream over gRPC/HTTP-2).
+pub const GRPC_SINCE: &str = "1.2.0";
+
+/// The first release with the `xhttp` transport (the tunnel over streaming HTTP/1.1).
+pub const XHTTP_SINCE: &str = "1.2.0";
+
+/// The first release with the `shadowtls` transport (camouflage TLS to a real site).
+pub const SHADOWTLS_SINCE: &str = "1.2.0";
 
 /// A `paqet` tunnel's `[tunnel.kcp]` table, and only its: an empty table is the same as
 /// none, and another transport never gets the table (the core refuses it there).
@@ -1756,6 +1826,7 @@ mod tests {
             ws_path: None,
             ws_mode: None,
             ws_host: None,
+            shadowtls_handshake: None,
             tls_sni: None,
             mux: None,
             tls_cert: None,
@@ -1814,6 +1885,7 @@ mod tests {
             ws_path: None,
             ws_mode: None,
             ws_host: None,
+            shadowtls_handshake: None,
             tls_sni: None,
             mux: None,
             tls_cert: None,
@@ -1879,6 +1951,7 @@ mod tests {
             ws_path: None,
             ws_mode: None,
             ws_host: None,
+            shadowtls_handshake: None,
             tls_sni: None,
             mux: None,
             encryption: None,
@@ -1923,6 +1996,7 @@ mod tests {
             ws_path: None,
             ws_mode: None,
             ws_host: None,
+            shadowtls_handshake: None,
             tls_sni: None,
             mux: max_streams.map(|v| crate::wire::MuxSpec {
                 max_streams: Some(v),
@@ -1974,6 +2048,7 @@ mod tests {
             ws_path: None,
             ws_mode: None,
             ws_host: None,
+            shadowtls_handshake: None,
             tls_sni: None,
             mux: None,
             encryption: None,
@@ -2058,6 +2133,7 @@ mod tests {
             ws_path: None,
             ws_mode: None,
             ws_host: None,
+            shadowtls_handshake: None,
             tls_sni: None,
             mux: None,
             encryption: None,
@@ -2121,6 +2197,7 @@ mod tests {
             ws_path: None,
             ws_mode: None,
             ws_host: None,
+            shadowtls_handshake: None,
             tls_sni: None,
             mux,
             quic_obfs: false,
@@ -2182,6 +2259,7 @@ mod tests {
             ws_path: Some("/".into()),
             ws_mode: None,
             ws_host: ws_host.map(str::to_owned),
+            shadowtls_handshake: None,
             tls_sni: sni.map(str::to_owned),
             mux: None,
             encryption: None,

@@ -351,6 +351,47 @@ impl Setup {
         }
     }
 
+    /// dns: KCP over UDP, each packet wrapped in a DNS query/response. UDP like kcp, so the
+    /// same short keepalive. No raw socket or root needed, so it runs here.
+    const fn dns(mode: &'static str) -> Self {
+        Self {
+            transport: "dns",
+            mux: true,
+            keepalive_secs: 5,
+            ..Self::tcp(mode)
+        }
+    }
+
+    /// grpc: a tunnel stream over a bidirectional gRPC call on cleartext HTTP/2. A stream
+    /// transport like tcp/ws (TCP underneath), so the default keepalive is fine.
+    const fn grpc(mode: &'static str) -> Self {
+        Self {
+            transport: "grpc",
+            mux: true,
+            ..Self::tcp(mode)
+        }
+    }
+
+    /// xhttp: the tunnel streamed over an HTTP/1.1 request/response with chunked bodies. A
+    /// stream transport like tcp/ws (TCP underneath).
+    const fn xhttp(mode: &'static str) -> Self {
+        Self {
+            transport: "xhttp",
+            mux: true,
+            ..Self::tcp(mode)
+        }
+    }
+
+    /// shadowtls: the tunnel inside a camouflage TLS connection (TCP underneath). A stream
+    /// transport like tcp/ws.
+    const fn shadowtls(mode: &'static str) -> Self {
+        Self {
+            transport: "shadowtls",
+            mux: true,
+            ..Self::tcp(mode)
+        }
+    }
+
     const fn no_mux(self) -> Self {
         Self { mux: false, ..self }
     }
@@ -417,6 +458,11 @@ impl Setup {
                 };
                 format!("[tunnel.tls]\nsni = \"tunnel.example\"\npin_sha256 = \"{pin}\"\n")
             };
+        }
+        if self.transport == "shadowtls" {
+            // The relay target is only used for unauthenticated probes, not this loopback
+            // test; the dialer uses its host (127.0.0.1) as the SNI base.
+            options += "[tunnel.shadowtls]\nhandshake = \"localhost:1\"\n";
         }
         if self.fec.0 > 0 || !self.kcp_options.is_empty() {
             options += "[tunnel.kcp]\n";
@@ -945,6 +991,18 @@ tunnel_tests! {
     kcp_reverse_no_mux: Setup::kcp("reverse").no_mux();
     kcp_direct_no_mux_chacha: Setup::kcp("direct").no_mux().encryption("chacha20-poly1305");
     kcp_reverse_fec: Setup::kcp("reverse").fec(10, 3);
+    dns_reverse: Setup::dns("reverse");
+    dns_direct: Setup::dns("direct");
+    dns_reverse_no_mux: Setup::dns("reverse").no_mux();
+    grpc_reverse: Setup::grpc("reverse");
+    grpc_direct: Setup::grpc("direct");
+    grpc_reverse_no_mux: Setup::grpc("reverse").no_mux();
+    xhttp_reverse: Setup::xhttp("reverse");
+    xhttp_direct: Setup::xhttp("direct");
+    xhttp_reverse_no_mux: Setup::xhttp("reverse").no_mux();
+    shadowtls_reverse: Setup::shadowtls("reverse");
+    shadowtls_direct: Setup::shadowtls("direct");
+    shadowtls_reverse_no_mux: Setup::shadowtls("reverse").no_mux();
     auto_reverse: Setup::tcp("reverse").transport("auto").mux();
     auto_direct: Setup::tcp("direct").transport("auto").mux();
 }

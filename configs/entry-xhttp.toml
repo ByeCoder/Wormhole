@@ -1,0 +1,21 @@
+# Entry side (Iran), reverse mode over xhttp: the tunnel streamed over an ordinary HTTP/1.1
+# request and response with chunked bodies (like XHTTP in Xray). Pair: exit-xhttp.toml.
+#
+# This phase speaks cleartext HTTP/1.1, so put it behind a CDN or reverse proxy that
+# terminates TLS and forwards HTTP to this port. A stream transport like tcp/ws: the
+# handshake, encryption and mux run on top.
+role = "entry"
+mode = "reverse"
+profile = "balanced"
+
+[tunnel]
+transport = "xhttp"
+listen = "0.0.0.0:8080"            # the HTTP port the CDN/proxy forwards to
+token = "CHANGE-ME-run-wormhole-token"
+
+[[forward]]
+listen = "0.0.0.0:443"
+target = "127.0.0.1:443"
+
+[log]
+level = "info"

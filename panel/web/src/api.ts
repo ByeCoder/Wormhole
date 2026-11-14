@@ -234,13 +234,14 @@ export interface SpeedPoll {
 export type LinkTransport = "auto" | "tcpmux" | "kcp" | "wss" | "quic";
 
 /** How a private network's links are made. */
-export type LinkKind = "gre" | "vxlan";
+export type LinkKind = "gre" | "vxlan" | "ipip" | "geneve" | "wireguard";
 
 /** Whether a benchmark path goes across a private network link (GRE or VXLAN). */
 export const isPrivatePath = (path: string) => path === "gre" || path === "vxlan";
 
 /** "GRE" or "VXLAN", as a label. */
-export const kindLabel = (kind: LinkKind | undefined) => (kind === "vxlan" ? "VXLAN" : "GRE");
+export const kindLabel = (kind: LinkKind | undefined) =>
+  kind === "vxlan" ? "VXLAN" : kind === "ipip" ? "IPIP" : kind === "geneve" ? "Geneve" : kind === "wireguard" ? "WireGuard" : "GRE";
 
 /** The panel's address on a private (GRE or VXLAN) network link to another server: what that server's agent can dial. */
 export interface GreAddr {
@@ -447,6 +448,7 @@ export interface PairRequest {
   ws_mode?: string;
   ws_host?: string;
   tls_sni?: string;
+  shadowtls_handshake?: string;
   mux?: MuxSpec;
   /** Paqet only: `[tunnel.kcp]` tuning. */
   kcp?: KcpSpec;
@@ -488,6 +490,7 @@ export interface Spec {
   ws_mode?: string;
   ws_host?: string;
   tls_sni?: string;
+  shadowtls_handshake?: string;
   tls_pin?: string;
   mux?: MuxSpec;
   /** Paqet only: the `[tunnel.kcp]` table that was in the file. */
@@ -744,7 +747,7 @@ export const api = {
   restore: (passphrase: string, data: string, replace: boolean) => call<{ servers: number; restart: boolean }>("POST", "restore", { passphrase, data, replace }),
   networks: () => call<{ networks: Network[]; links: Link[] }>("GET", "networks"),
   createNetwork: (name: string, cidr: string, kind: LinkKind = "gre", port?: number, ipv6 = false) =>
-    call<Network>("POST", "networks", { name, cidr, kind, ipv6, ...(kind === "vxlan" && port ? { port } : {}) }),
+    call<Network>("POST", "networks", { name, cidr, kind, ipv6, ...((kind === "vxlan" || kind === "geneve" || kind === "wireguard") && port ? { port } : {}) }),
   /** With `links`, the network's links go too. `later`: the servers that remove the interfaces when they can (offline, or no answer yet). */
   deleteNetwork: (id: string, links = false, force = false) => call<NetDeleted>("POST", "networks/delete", { id, links, force }),
   /** `ipv6`: between the servers' IPv6 addresses (left out: as the network's links are). */

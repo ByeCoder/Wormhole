@@ -573,10 +573,12 @@ async fn unframed_writes_are_not_framed() {
         .unwrap()
         .unframed(true);
     client.write_all(b"plain bytes").await.unwrap();
-    client
+    // A vectored write may take only part of the slices; the first one at least.
+    let wrote = client
         .write_vectored(&[io::IoSlice::new(b"+"), io::IoSlice::new(b"more")])
         .await
         .unwrap();
+    assert!(wrote >= 1);
     client.shutdown().await.unwrap();
     let mut seen = Vec::new();
     wire.read_to_end(&mut seen).await.unwrap();

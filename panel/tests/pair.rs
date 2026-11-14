@@ -160,6 +160,7 @@ async fn a_pair_is_made_edited_stopped_deleted_and_a_failure_leaves_nothing() {
         ws_path: None,
         ws_mode: None,
         ws_host: None,
+        shadowtls_handshake: None,
         tls_sni: None,
         mux: None,
         tls_cert: None,
@@ -177,6 +178,7 @@ async fn a_pair_is_made_edited_stopped_deleted_and_a_failure_leaves_nothing() {
         }],
         rotate: false,
         network: None,
+        spoof: None,
     };
 
     // ---- a check names a taken port ----
@@ -352,6 +354,7 @@ async fn a_tunnel_moves_to_another_server_and_a_move_that_fails_changes_nothing(
         ws_path: None,
         ws_mode: None,
         ws_host: None,
+        shadowtls_handshake: None,
         tls_sni: None,
         mux: None,
         tls_cert: None,
@@ -369,6 +372,7 @@ async fn a_tunnel_moves_to_another_server_and_a_move_that_fails_changes_nothing(
         }],
         rotate: false,
         network: None,
+        spoof: None,
     };
     let op = pair::create(&hub, request(&a, listen)).unwrap();
     assert_eq!(finished(&hub, &op).await.state, "done");

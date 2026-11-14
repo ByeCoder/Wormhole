@@ -1,5 +1,68 @@
 # Changelog
 
+## 1.2.0 - 2026-11-14
+
+New transports, each a sibling of an existing one, so the handshake, encryption, mux and KCP
+layers above them are unchanged. Both servers need 1.2.0.
+
+- **`icmp`** — the encrypted KCP of `paqet`, carried in the payload of ICMP echo (ping)
+  packets over a raw socket, for the hardest routes where both UDP and TCP are blocked or
+  throttled but ping still gets through. IPv4 and Linux only, needs root (or `CAP_NET_RAW`).
+  The service opens the raw socket and adds scoped host firewall rules of its own (dropping
+  only the kernel's own echo replies to the peer, so the traffic does not double), and removes
+  them when it stops. The ICMP echo identifier stands in for a port, so several tunnels — and
+  the host's own `ping` — stay apart. In the panel: pick *ICMP (ping)* as the transport in the
+  tunnel wizard and editor. Sample configs: `configs/entry-icmp.toml`, `configs/exit-icmp.toml`.
+  Guide: [Transports](docs/transports.md#icmp).
+- **`dns`** — the encrypted KCP of `kcp`, wrapped in DNS query/response messages over UDP
+  (port 53 on the listening side), for paths that pass only DNS. A direct server-to-server
+  tunnel, so the sealed packet rides whole in a record's RDATA (not squeezed into the query
+  name) and does not go through a recursive resolver. Works over IPv4 and IPv6; binding port
+  53 needs root. The KCP MTU is capped so each DNS message stays within a common EDNS0 buffer,
+  so throughput is lower — DNS is a last resort. In the panel: pick *DNS* as the transport.
+  Sample configs: `configs/entry-dns.toml`, `configs/exit-dns.toml`. Guide:
+  [Transports](docs/transports.md#dns).
+- **`grpc`** — the tunnel carried as one bidirectional gRPC call over HTTP/2 (the `h2`
+  crate, behind the default-on `grpc` cargo feature), to pass through CDNs and reverse
+  proxies that speak gRPC. A stream transport like `tcp`/`ws`: the handshake, encryption and
+  mux run on top, and the bytes travel in gRPC length-prefixed messages. This phase is
+  cleartext HTTP/2 (h2c), so run it behind a TLS-terminating CDN or proxy; native TLS with
+  ALPN `h2` is a planned follow-up. No root; IPv4 or IPv6. In the panel: pick *gRPC* as the
+  transport. Sample configs: `configs/entry-grpc.toml`, `configs/exit-grpc.toml`. Guide:
+  [Transports](docs/transports.md#grpc).
+- **`xhttp`** — the tunnel streamed over one ordinary HTTP/1.1 request and response with
+  chunked bodies (like XHTTP in Xray), for paths that pass only HTTP or that sit behind an
+  HTTP CDN/proxy. A stream transport like `tcp`/`ws`, with no new dependency (the HTTP is
+  written and parsed directly). Cleartext HTTP/1.1 in this phase, so run it behind a
+  TLS-terminating front; native TLS is a planned follow-up. No root; IPv4 or IPv6. In the
+  panel: pick *XHTTP* as the transport. Sample configs: `configs/entry-xhttp.toml`,
+  `configs/exit-xhttp.toml`. Guide: [Transports](docs/transports.md#xhttp).
+
+- **`shadowtls`** — a TLS tunnel disguised as a connection to a real HTTPS site
+  (ShadowTLS v3 idea, behind the default-on `shadowtls` cargo feature). The listening side
+  reads the TLS ClientHello: a real client proves itself with a token-keyed server name
+  (SNI) and gets the tunnel; any other probe is relayed byte-for-byte to the genuine
+  `[tunnel.shadowtls] handshake` site, so an active prober sees that site's real
+  certificate and cannot tell the port from a reverse proxy in front of it. A stream
+  transport like `tcp`/`ws`; needs no certificate of your own (unlike `wss`). No root; IPv4
+  or IPv6. In the panel: pick *ShadowTLS* and fill in the handshake site. Sample configs:
+  `configs/entry-shadowtls.toml`, `configs/exit-shadowtls.toml`. Guide:
+  [Transports](docs/transports.md#shadowtls).
+
+Private networks:
+
+- **IPIP** and **Geneve** link kinds, beside GRE and VXLAN, in the panel's private networks.
+  IPIP is the lightest (IPv4 in IPv4, 20 bytes per packet, no key or port); Geneve is VXLAN's
+  IETF-standard cousin (UDP port 6081 by default, 50 bytes). Both work over IPv4 and IPv6, are
+  offered in *Add server* and when making a network, and the agent reports whether the kernel
+  can make each. Guide: [Private networks](docs/networks.md#ipip-and-geneve).
+- **WireGuard** private networks, the first **encrypted** link kind. The panel generates a
+  Curve25519 key pair for each end (as `wg genkey` does), stores them, and hands each server only
+  its own private key and the peer's public key — nothing is typed by hand. UDP (port 51820 by
+  default), 60 bytes per packet, over IPv4 or IPv6; needs the `wireguard` module and the `wg`
+  tool. Offered in *Add server* alongside GRE/VXLAN/IPIP/Geneve. Guide:
+  [Private networks](docs/networks.md#wireguard).
+
 ## 1.1.0 - 2026-11-13
 
 - **Two new ways to carry a `ws` / `wss` tunnel** (`[tunnel.ws] mode`, both servers 1.1.0):

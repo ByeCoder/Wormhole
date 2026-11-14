@@ -158,6 +158,12 @@ pub struct NetSpec {
     pub kind: LinkKind,
     #[serde(default, skip_serializing_if = "is_zero")]
     pub port: u16,
+    /// WireGuard only: this end's private key and the peer's public key, base64, both made
+    /// by the panel. Left out (and refused by an older agent) for every other kind.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub wg_private: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub wg_peer: String,
 }
 
 fn is_zero(port: &u16) -> bool {
@@ -173,6 +179,13 @@ pub enum LinkKind {
     Gre,
     /// Ethernet frames in UDP datagrams.
     Vxlan,
+    /// IPv4 in IPv4 (IP protocol 4), the lightest encapsulation. No key or port.
+    Ipip,
+    /// Like VXLAN but the IETF-standard header (UDP, port 6081 by default).
+    Geneve,
+    /// An encrypted WireGuard tunnel (UDP). The panel makes both ends' keys; `port` is the
+    /// listen port, shared by both sides.
+    Wireguard,
 }
 
 impl LinkKind {
@@ -180,10 +193,24 @@ impl LinkKind {
         *self == Self::Gre
     }
 
+    /// Whether the link rides UDP (a port is used): VXLAN, Geneve and WireGuard.
+    pub fn is_udp(&self) -> bool {
+        matches!(self, Self::Vxlan | Self::Geneve | Self::Wireguard)
+    }
+
+    /// Whether the link carries its own keys (WireGuard): the panel fills them in, they are
+    /// not asked for.
+    pub fn is_wireguard(&self) -> bool {
+        *self == Self::Wireguard
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Gre => "gre",
             Self::Vxlan => "vxlan",
+            Self::Ipip => "ipip",
+            Self::Geneve => "geneve",
+            Self::Wireguard => "wireguard",
         }
     }
 
@@ -191,6 +218,9 @@ impl LinkKind {
         match text {
             "gre" => Some(Self::Gre),
             "vxlan" => Some(Self::Vxlan),
+            "ipip" => Some(Self::Ipip),
+            "geneve" => Some(Self::Geneve),
+            "wireguard" => Some(Self::Wireguard),
             _ => None,
         }
     }
@@ -227,6 +257,32 @@ pub struct NetStatus {
     pub vxlan6: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vxlan6_reason: Option<String>,
+    /// This server can make IPIP (and `ip6tnl`) interfaces. An agent before 1.2.0 does not
+    /// say, which reads as no.
+    #[serde(default)]
+    pub ipip: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ipip_reason: Option<String>,
+    #[serde(default)]
+    pub ipip6: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ipip6_reason: Option<String>,
+    /// This server can make Geneve interfaces (the `geneve` module). An agent before 1.2.0
+    /// does not say, which reads as no.
+    #[serde(default)]
+    pub geneve: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub geneve_reason: Option<String>,
+    #[serde(default)]
+    pub geneve6: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub geneve6_reason: Option<String>,
+    /// This server can make WireGuard interfaces: the `wireguard` kernel module and the `wg`
+    /// tool are both there. An agent before 1.2.0 does not say, which reads as no.
+    #[serde(default)]
+    pub wireguard: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wireguard_reason: Option<String>,
     #[serde(default)]
     pub links: Vec<NetIface>,
 }
@@ -390,6 +446,10 @@ pub struct Spec {
     pub tls_sni: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tls_pin: Option<String>,
+    /// A `shadowtls` tunnel's `[tunnel.shadowtls] handshake` (the real site to borrow a TLS
+    /// appearance from), on both sides. Only an agent of 1.2.0 or newer reads it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shadowtls_handshake: Option<String>,
     /// A listening wss side: the certificate and key files of a real certificate (made by
     /// [`Request::TunnelCert`], under `/etc/letsencrypt/live/`) instead of a self-signed one.
     #[serde(default, skip_serializing_if = "Option::is_none")]

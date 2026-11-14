@@ -1,0 +1,27 @@
+# Entry side (Iran), reverse mode over shadowtls: a TLS tunnel disguised as a connection
+# to a real HTTPS site (ShadowTLS-style). Pair: exit-shadowtls.toml.
+#
+# The listening side watches the TLS ClientHello. A real client proves itself with an SNI
+# derived from the tunnel token, and gets the tunnel; any other probe is relayed to the
+# genuine handshake site, so the port looks like an ordinary HTTPS mirror of that site.
+# A stream transport: the handshake, encryption and mux run on top.
+role = "entry"
+mode = "reverse"
+profile = "balanced"
+
+[tunnel]
+transport = "shadowtls"
+listen = "0.0.0.0:443"             # looks like an HTTPS site to anyone probing
+token = "CHANGE-ME-run-wormhole-token"
+
+# The real site to imitate and to relay stray probes to. Pick a reachable HTTPS host that
+# is plausible for this server; both sides must set the same value.
+[tunnel.shadowtls]
+handshake = "www.microsoft.com:443"
+
+[[forward]]
+listen = "0.0.0.0:8443"
+target = "127.0.0.1:443"
+
+[log]
+level = "info"
