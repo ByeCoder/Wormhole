@@ -34,16 +34,12 @@ const T = {
     more: "Read more",
     s3: "Which transport?",
     l3: "Answer four questions; the chooser gives the transport and the two lines of config.",
-    s4: "The panel",
-    l4: "The real panel's screens with sample data, in your browser. The password is wormhole; nothing is sent anywhere.",
-    try: "Open it full screen",
     s5: "Install in one line",
     l5: "As root, on each server. It installs Wormhole for your CPU (x86_64, aarch64, armv7), checks the signature, and opens a menu you move in with the arrow keys.",
     cmd: "bash <(curl -fsSL https://raw.githubusercontent.com/ByeCoder/Wormhole/main/scripts/wormhole.sh)",
     panelCmd: "Then, for the panel, on the server that will hold it:",
     next: "Documentation",
     gh: "Source on GitHub",
-    frameTitle: "Wormhole panel demo",
     notes: `Version ${VERSION}`,
   },
   fa: {
@@ -72,16 +68,12 @@ const T = {
     more: "بیشتر بخوانید",
     s3: "کدام ترنسپورت؟",
     l3: "به چهار پرسش جواب بدهید؛ انتخابگر ترنسپورت و دو خط کانفیگ آن را می‌دهد.",
-    s4: "پنل",
-    l4: "صفحه‌های پنل واقعی، با داده‌های نمونه، در مرورگر خودتان. رمز ورود wormhole است و چیزی جایی فرستاده نمی‌شود.",
-    try: "باز کردن تمام‌صفحه",
     s5: "نصب با یک خط",
     l5: "با دسترسی root، روی هر سرور. کرم‌چاله را برای CPU شما نصب می‌کند (x86_64، aarch64، armv7)، امضا را می‌سنجد و منویی باز می‌کند که با کلیدهای جهت در آن جابه‌جا می‌شوید.",
     cmd: "bash <(curl -fsSL https://raw.githubusercontent.com/ByeCoder/Wormhole/main/scripts/wormhole.sh)",
     panelCmd: "",
     next: "مستندات",
     gh: "سورس در گیت‌هاب",
-    frameTitle: "دموی پنل کرم‌چاله",
     notes: "",
   },
 }[lang];
@@ -98,7 +90,6 @@ const T = {
         <p class="lead">{T.lead}</p>
         <div class="actions">
           <a class="btn primary" href={href(lang, "/docs/getting-started/")}>{T.start}</a>
-          <a class="btn" href={href(lang, "/try/")}>{lang === "fa" ? "پنل را امتحان کنید" : "Try the panel"}</a>
         </div>
       </div>
       <div class="hero-cue" data-fade aria-hidden="true"><span>{T.scroll} ↓</span></div>
@@ -136,19 +127,6 @@ const T = {
       <p class="lead">{T.l3}</p>
       <Chooser lang={lang} />
       <p><a href={href(lang, "/docs/transports/")}>{T.more} →</a></p>
-    </div>
-  </section>
-
-  <section class="stratum alt" aria-labelledby="s4">
-    <span class="depth" aria-hidden="true">−{n(40)} m</span>
-    <div class="wrap">
-      <h2 id="s4">{T.s4}</h2>
-      <p class="lead">{T.l4}</p>
-      <div class="frame">
-        <div class="bar" aria-hidden="true"><i></i><i></i><i></i><span>wormhole-panel · demo</span></div>
-        <iframe title={T.frameTitle} src={`${import.meta.env.BASE_URL}demo/index.html?lang=${lang}`} loading="lazy"></iframe>
-      </div>
-      <p style="margin-top:var(--sp-4)"><a class="btn" href={href(lang, "/try/")}>{T.try}</a></p>
     </div>
   </section>
 
