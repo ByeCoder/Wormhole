@@ -96,8 +96,13 @@ impl Config {
     /// transport, its address on the member's port, and only the sections that transport
     /// reads (the others belong to other members).
     pub fn member(&self, kind: TransportKind, addr: &str) -> Config {
+        // The member pings at the multi tunnel's pace (fast unless set), not at the slower
+        // default of its own transport: a dead path has to be noticed in seconds so its
+        // streams end and new ones go to the others.
+        let ping = self.mux().ping_interval.as_secs();
         let mut c = self.clone();
         let t = &mut c.tunnel;
+        t.mux.ping_interval_secs.get_or_insert(ping);
         t.transport = kind;
         t.multi = None;
         if self.is_acceptor() {

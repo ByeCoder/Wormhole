@@ -2850,6 +2850,25 @@ keepalive_secs = 1
         assert_eq!(wss.tunnel.transport, TransportKind::Wss);
         assert_eq!(wss.tunnel.remote.as_deref(), Some("203.0.113.1:445"));
         assert!(wss.tunnel.multi.is_none());
+        // ... but pings at the multi tunnel's fast pace, not at its own slower default, so a
+        // dead path is noticed in seconds; a ping that was set is kept.
+        assert_eq!(
+            wss.mux().ping_interval,
+            Duration::from_secs(crate::auto::PING_SECS)
+        );
+        let quic = c.member(TransportKind::Quic, "203.0.113.1:446");
+        assert_eq!(
+            quic.mux().ping_interval,
+            Duration::from_secs(crate::auto::PING_SECS)
+        );
+        let set = "[tunnel.multi]\ntransports = [\"tcp\", \"ws\"]\n\n[tunnel.mux]\nping_interval_secs = 15";
+        let slow = Config::parse(&with_transport("entry", "multi", set)).unwrap();
+        assert_eq!(
+            slow.member(TransportKind::Ws, "203.0.113.1:444")
+                .mux()
+                .ping_interval,
+            Duration::from_secs(15)
+        );
         // Listed ports are taken as they are.
         let listed = "[tunnel.multi]\ntransports = [\"kcp\", \"ws\"]\nports = [8443, 80]";
         let c = Config::parse(&with_transport("exit", "multi", listed)).unwrap();
