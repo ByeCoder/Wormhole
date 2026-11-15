@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.2.0 - 2026-11-14
+## 1.2.0 - 2026-11-15
 
 New transports, each a sibling of an existing one, so the handshake, encryption, mux and KCP
 layers above them are unchanged. Both servers need 1.2.0.

@@ -414,7 +414,7 @@ arch() {
 # The key releases are signed with. Only the release workflow has the
 # private half. It is checked with openssl (1.1.1 or later, or 3).
 RELEASE_KEY_PEM='-----BEGIN PUBLIC KEY-----
-MCowBQYDK2VwAyEAWGxcNhmewk/DsktXLy2UgJ5ZOLS0fktw7D2/obNvjTs=
+MCowBQYDK2VwAyEAZ8m1bmVYmHryIVZttGS575qeT+EuAlN3tUQe5dI+SUg=
 -----END PUBLIC KEY-----'
 # A user can pin a key of their own (a fork, or a test): WORMHOLE_RELEASE_KEY_PEM.
 RELEASE_KEY_PEM=${WORMHOLE_RELEASE_KEY_PEM:-$RELEASE_KEY_PEM}
