@@ -430,7 +430,7 @@ function TunnelPage({
                   {t("up.for", { span: span(tunnel.uptime) })}
                 </span>
               )}
-              <span className={`tag ${tunnel.via ? "via" : ""}`} dir="ltr" title={tunnel.via ? t("td.autoNow", { via: tunnel.via.replace(/tcpmux/g, "tcp") }) : undefined}>
+              <span className={`tag ${tunnel.via ? "via" : ""}`} dir="ltr" title={tunnel.via ? t(tunnel.transport === "multi" ? "td.multiNow" : "td.autoNow", { via: tunnel.via.replace(/tcpmux/g, "tcp") }) : undefined}>
                 {transportLabel(tunnel.transport, tunnel.via)}
               </span>
               <span className="tag">{tunnel.profile}</span>
@@ -878,7 +878,11 @@ export function TunnelsPage({
     );
   }
 
+  // The dialogs stay where they are in the tree when the page switches between the list and a
+  // tunnel's page (a deleted tunnel's page goes back to the list): moved, the dialog would start over
+  // and lose the operation it is showing.
   return (
+    <>
     <div className="page is-on">
       <div className="page-band">
         {order ? (
@@ -1065,7 +1069,8 @@ export function TunnelsPage({
           </div>
         </div>
       )}
-      {dialogs}
     </div>
+    {dialogs}
+    </>
   );
 }

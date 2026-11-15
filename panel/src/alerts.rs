@@ -639,6 +639,7 @@ mod tests {
                 active: Some(true),
                 status: up.map(status),
                 error: None,
+                multi: None,
             },
             rate_mbps: None,
         }

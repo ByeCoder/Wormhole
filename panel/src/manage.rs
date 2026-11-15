@@ -55,7 +55,7 @@ pub fn render(spec: &Spec, token: &str, cert_files: Option<(&Path, &Path)>) -> R
     if let Some(cipher) = spec.encryption.as_deref().filter(|c| *c != "auto") {
         tunnel.insert("encryption".into(), text(cipher));
     }
-    if spec.quic_obfs && spec.transport == "quic" {
+    if spec.quic_obfs && runs(spec, "quic") {
         let mut quic = Table::new();
         quic.insert("obfs".into(), Value::Boolean(true));
         tunnel.insert("quic".into(), Value::Table(quic));
@@ -204,6 +204,12 @@ pub fn render(spec: &Spec, token: &str, cert_files: Option<(&Path, &Path)>) -> R
         }
         tunnel.insert("tls".into(), Value::Table(tls));
     }
+    if let Some(members) = spec.multi.as_ref().filter(|_| spec.transport == "multi") {
+        let mut multi = Table::new();
+        let list = members.iter().map(|m| text(m)).collect();
+        multi.insert("transports".into(), Value::Array(list));
+        tunnel.insert("multi".into(), Value::Table(multi));
+    }
     if let Some(handshake) = &spec.shadowtls_handshake {
         let mut st = Table::new();
         st.insert("handshake".into(), text(handshake));
@@ -271,6 +277,12 @@ fn build(dir: &Path, spec: &Spec, for_check: bool) -> Result<(String, Config)> {
     Ok((text, config))
 }
 
+/// Whether the spec runs `transport`: as its transport, or as one of a `multi` tunnel's.
+fn runs(spec: &Spec, transport: &str) -> bool {
+    spec.transport == transport
+        || (spec.transport == "multi" && spec.multi.iter().flatten().any(|m| m == transport))
+}
+
 /// Whether this side of the spec listens for the tunnel.
 fn is_acceptor(spec: &Spec) -> bool {
     matches!(
@@ -281,7 +293,7 @@ fn is_acceptor(spec: &Spec) -> bool {
 
 /// The certificate and key of a listening wss side, beside its config.
 fn cert_files(dir: &Path, spec: &Spec) -> Option<(PathBuf, PathBuf)> {
-    if !(spec.transport == "wss" && is_acceptor(spec)) {
+    if !(runs(spec, "wss") && is_acceptor(spec)) {
         return None;
     }
     if let Some(own) = own_cert(spec) {
@@ -382,7 +394,22 @@ pub fn wanted_ports(spec: &Spec) -> Vec<(&'static str, u16)> {
         // excluded by `check` below, from the spec it is replacing. icmp has no kernel
         // port at all (its "port" is an ICMP identifier), so it reserves nothing.
         let udp = matches!(spec.transport.as_str(), "quic" | "kcp" | "dns");
-        if spec.transport != "icmp" {
+        // A multi tunnel listens for each of its transports on its own port: the tunnel's
+        // port for the first, then the next ones.
+        if let Some(members) = spec.multi.as_ref().filter(|_| spec.transport == "multi") {
+            if let Some(p) = spec.listen.as_deref().and_then(port) {
+                for (i, m) in members.iter().enumerate() {
+                    let Some(p) = u16::try_from(usize::from(p) + i).ok() else {
+                        continue;
+                    };
+                    match m.as_str() {
+                        "icmp" => {}
+                        "quic" | "kcp" | "dns" => out.push(("udp", p)),
+                        _ => out.push(("tcp", p)),
+                    }
+                }
+            }
+        } else if spec.transport != "icmp" {
             if let Some(p) = spec.listen.as_deref().and_then(port) {
                 out.push((if udp { "udp" } else { "tcp" }, p));
                 // Auto listens for all of its transports: UDP on the port too, and a
@@ -625,6 +652,11 @@ pub fn get(dir: &Path, name: &str) -> Result<Spec> {
         spoof,
         tls_sni: c.tunnel.tls.as_ref().and_then(|t| t.sni.clone()),
         shadowtls_handshake: c.tunnel.shadowtls.as_ref().map(|s| s.handshake.clone()),
+        multi: c
+            .tunnel
+            .multi
+            .as_ref()
+            .map(|m| m.transports.iter().map(|k| k.name().to_owned()).collect()),
         tls_cert: c
             .tunnel
             .tls
@@ -1892,6 +1924,42 @@ mod tests {
         assert_eq!(get(&d.0, "secure-exit").unwrap().tls_pin, Some(pin));
         remove_files(&d.0, "secure-exit").unwrap();
         assert_eq!(std::fs::read_dir(&d.0).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn a_multi_tunnel_writes_its_transports_and_listens_on_each_port() {
+        let d = Dir::new();
+        let s = Spec {
+            name: "multi-exit".into(),
+            role: "exit".into(),
+            mode: "direct".into(),
+            transport: "multi".into(),
+            listen: Some("0.0.0.0:443".into()),
+            token: Some("d".repeat(48)),
+            ws_path: Some("/x".into()),
+            multi: Some(vec![
+                "xhttp".into(),
+                "tcp".into(),
+                "wss".into(),
+                "kcp".into(),
+            ]),
+            ..Default::default()
+        };
+        // The wss member listens with a certificate of its own, whose pin comes back.
+        let pin = put(&d.0, &s).unwrap().expect("a pin for the wss member");
+        assert_eq!(pin.len(), 64);
+        let text = std::fs::read_to_string(d.0.join("multi-exit.toml")).unwrap();
+        assert!(text.contains("transport = \"multi\""), "{text}");
+        assert!(text.contains("[tunnel.multi]"), "{text}");
+        let back = get(&d.0, "multi-exit").unwrap();
+        assert_eq!(back.transport, "multi");
+        assert_eq!(back.multi, s.multi);
+        // One port each: the tunnel's, then the next ones, UDP for kcp.
+        assert_eq!(
+            wanted_ports(&s),
+            vec![("tcp", 443), ("tcp", 444), ("tcp", 445), ("udp", 446)]
+        );
+        remove_files(&d.0, "multi-exit").unwrap();
     }
 
     #[test]

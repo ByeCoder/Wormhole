@@ -1,0 +1,17 @@
+# Exit side (abroad), reverse mode over several transports at once. Pair: entry-multi.toml.
+# The list (and `ports`, if set) must match the entry side's: this side dials each transport
+# at the same host, on its own port.
+role = "exit"
+mode = "reverse"
+profile = "balanced"
+
+[tunnel]
+transport = "multi"
+remote = "ENTRY_SERVER_IP:8443"
+token = "CHANGE-ME-run-wormhole-token"
+
+[tunnel.multi]
+transports = ["tcp", "ws", "xhttp"]
+
+[log]
+level = "info"

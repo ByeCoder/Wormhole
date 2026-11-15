@@ -144,6 +144,15 @@ impl Dial {
         Ok(Self::One(Dialer::new(settings, addr, tuning)?))
     }
 
+    /// One transport that reports its name from [`Self::connect`] (a `mux.spread` or
+    /// `multi` member), so the status shows which transports carry the sessions.
+    pub fn fixed(kind: TransportKind, dialer: Dialer) -> Self {
+        Self::Auto {
+            dialers: vec![(kind, dialer)],
+            preferred: AtomicUsize::new(0),
+        }
+    }
+
     pub fn auto(base: &Settings, token: &str, addr: &str, tuning: &Tuning) -> io::Result<Self> {
         let mut dialers = Vec::new();
         for kind in KINDS {
@@ -172,10 +181,7 @@ impl Dial {
         for kind in KINDS {
             let at = addr_for(kind, addr)?;
             let dialer = Dialer::new(&settings_for(base, kind, token), &at, tuning)?;
-            dials.push(Self::Auto {
-                dialers: vec![(kind, dialer)],
-                preferred: AtomicUsize::new(0),
-            });
+            dials.push(Self::fixed(kind, dialer));
         }
         Ok(dials)
     }

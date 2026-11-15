@@ -11,6 +11,7 @@ import { MuxFields, MuxToggle, SpreadToggle, emptyMux, muxSpecOf, muxToSpec } fr
 import { TlsChoice, emptyTls, tlsReady } from "./TlsChoice";
 import { EncryptionChoice, cipherOf, cipherReady } from "./EncryptionChoice";
 import { QuicObfs, obfsOf } from "./QuicObfs";
+import { DEFAULT_MEMBERS, MultiPicker, membersReady } from "./MultiPicker";
 import { KcpFields, emptyKcp, kcpSpecOf, kcpToSpec } from "./PaqetFields";
 import { SpoofFields, emptySpoof, spoofToPair } from "./SpoofFields";
 import { PerIpLimit, perIpOf } from "./PerIpLimit";
@@ -20,7 +21,7 @@ import type { ProxyChoice } from "./ProxyProtocol";
 import { Choice, More, noteOf, pairOf } from "./Choice";
 import { BenchPanel, benchLabel, isV6 } from "./Benchmark";
 import type { BenchChoice } from "./Benchmark";
-import { MUX_OPTIONAL, TRANSPORTS, joinTransport, transportLabel } from "./transport";
+import { MUX_OPTIONAL, TRANSPORTS, joinTransport, multiPorts, runsTransport, transportLabel } from "./transport";
 import { WsModeChoice, wsModeField } from "./WsMode";
 import type { WsMode } from "./WsMode";
 import { FIRST_TUNNEL_PORT, firstTunnelPort, freeTunnelPort, hostOf, portOf, portsInUse } from "./ports";
@@ -91,6 +92,11 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
   const [exit, setExit] = useState("");
   const [mode, setMode] = useState("reverse");
   const [transport, setTransport] = useState<string>("tcp");
+  // A multi tunnel's transports, in port order.
+  const [members, setMembers] = useState<string[]>(DEFAULT_MEMBERS);
+  const multi = transport === "multi";
+  // Whether the tunnel runs `x`: as its transport, or as one of a multi tunnel's.
+  const has = (x: string) => runsTransport(transport, members, x);
   const [muxOn, setMuxOn] = useState(true);
   const [profile, setProfile] = useState<string>("balanced");
   const [listenPort, setListenPort] = useState(String(FIRST_TUNNEL_PORT));
@@ -181,8 +187,8 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
   const greLink = netId ? linkBetween(links, netId, entry, exit) : undefined;
   // The tunnel listens on the private address of the server that accepts it, in either mode.
   const greAddr = greLink ? (greLink.a === acceptor ? greLink.addr_a : greLink.addr_b) : "";
-  const udp = transport === "quic" || transport === "kcp" || transport === "dns";
-  const isWs = transport === "ws" || transport === "wss";
+  const udp = !multi && (transport === "quic" || transport === "kcp" || transport === "dns");
+  const isWs = has("ws") || has("wss");
 
   // The accepting server's address, as the other one reaches it. A new tunnel starts from
   // the best guess (the address set for it, else the one the panel sees) until one is typed.
@@ -209,7 +215,7 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
   // server's other tunnels hold: 3080, then 3081, then 3082. It follows the choice of server
   // and transport (auto needs one more port), and stops once a port is typed.
   const takenPorts = useMemo(() => portsInUse(acceptorServer), [acceptorServer]);
-  const suggestedPort = String(freeTunnelPort(takenPorts, transport));
+  const suggestedPort = String(freeTunnelPort(takenPorts, transport, members.length));
   useEffect(() => {
     if (!portTouched) setListenPort(suggestedPort);
   }, [portTouched, suggestedPort]);
@@ -230,20 +236,21 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
     ws_host: isWs && wsHost.trim() ? wsHost.trim() : undefined,
     // A server name typed for a self-signed certificate is not sent with a real one: the
     // other side checks a real one against the name it was issued for (tls_host).
-    tls_sni: transport === "wss" && tls.mode === "self" && sni.trim() ? sni.trim() : undefined,
-    shadowtls_handshake: transport === "shadowtls" && stHandshake.trim() ? stHandshake.trim() : undefined,
+    tls_sni: has("wss") && tls.mode === "self" && sni.trim() ? sni.trim() : undefined,
+    shadowtls_handshake: has("shadowtls") && stHandshake.trim() ? stHandshake.trim() : undefined,
     mux: muxSpecOf(mux, transport, muxOn),
     kcp: kcpSpecOf(kcp, transport, profile),
     spoof: spoofOn ? spoofToPair(spoof).spoof : undefined,
     encryption: cipherOf(enc, transport),
-    quic_obfs: obfsOf(obfs, transport),
+    quic_obfs: obfsOf(obfs, has("quic") ? "quic" : transport),
     max_conns_per_ip: perIpOf(perIp).value,
     udp_max_flows: protocol.includes("udp") ? udpFlowsOf(udpFlows).value : undefined,
     proxy_protocol: proxyOf(proxy, protocol),
-    tls_cert: transport === "wss" && tls.mode !== "self" && tls.cert ? tls.cert : undefined,
-    tls_key: transport === "wss" && tls.mode !== "self" && tls.key ? tls.key : undefined,
-    tls_host: transport === "wss" && tls.mode !== "self" && tls.cert && tls.host ? tls.host.toLowerCase() : undefined,
+    tls_cert: has("wss") && tls.mode !== "self" && tls.cert ? tls.cert : undefined,
+    tls_key: has("wss") && tls.mode !== "self" && tls.key ? tls.key : undefined,
+    tls_host: has("wss") && tls.mode !== "self" && tls.cert && tls.host ? tls.host.toLowerCase() : undefined,
     forwards: parsed.forwards,
+    multi: multi ? members : undefined,
   });
 
   const problem = (s: number): string => {
@@ -259,8 +266,9 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
       if (!dialHost.trim() && !netId) return t("wz.dial", { server: serverName(acceptor), other: serverName(dialer) });
       if (paqet && isV6(dialHost)) return t("paqet.ip");
       if (isWs && !wsPath.startsWith("/")) return t("wz.wsPath");
-      if (transport === "wss" && !tlsReady(tls)) return t(tls.mode === "own" ? "tls.needOwn" : "tls.needCert");
+      if (has("wss") && !tlsReady(tls)) return t(tls.mode === "own" ? "tls.needOwn" : "tls.needCert");
     }
+    if (s === 1 && multi && !membersReady(members)) return t("wz.multi.need2");
     if (s === 1 && !cipherReady(enc, transport, encAck)) return t("enc.needAck");
     if (s === 1 && muxToSpec(mux).bad) return t(`mux.${muxToSpec(mux).bad}`) + ": " + t("mux.badValue");
     if (s === 1 && transport === "paqet") {
@@ -329,13 +337,13 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
   const muxSpec = muxToSpec(mux);
   const kcpSpec = kcpToSpec(kcp, profile);
   const kcpNote = transport === "paqet" && kcpSpec.spec ? t("kcp.custom") : t("kcp.fromProfile");
-  const selfSigned = transport === "wss" && tls.mode === "self";
+  const selfSigned = has("wss") && tls.mode === "self";
   const plainTcp = transport === "tcp" && !muxOn;
   const udpPorts = protocol.includes("udp");
   const kindNote = noteOf(
     [
       transport !== "quic" && pairOf(t("enc.title"), t(`enc.${enc}`)),
-      transport === "quic" && obfs && "obfs",
+      has("quic") && obfs && "obfs",
       pairOf("mux", t(muxShown ? "mux.on" : "mux.off")),
     ],
     [],
@@ -461,12 +469,13 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
                 <div className="wz-fields">
                   <Choice label={t("wz.modeLabel")} value={mode} options={[["reverse", t("wz.mode.reverse")], ["direct", t("wz.mode.direct")]]} onChange={setMode} hint={t(`wz.mode.${mode}.d`)} />
                   <Choice label={t("wz.transport")} mono value={transport} options={TRANSPORTS.map((x) => [x, x])} onChange={setTransport} hint={t(`wz.tr.${transport}`)} />
+                  {multi && <MultiPicker value={members} onChange={setMembers} />}
                   <WsModeChoice transport={transport} value={wsMode} onChange={setWsMode} />
                   <Choice label={t("wz.profile")} value={profile} options={PROFILES.map((p) => [p, t(`wz.pf.${p}`)])} onChange={setProfile} hint={t(`wz.pf.${profile}.d`)} />
                 </div>
                 <More title={t("more.title")} note={kindNote} show={step === 1 && !!error}>
                   <EncryptionChoice value={enc} onChange={setEnc} transport={transport} ack={encAck} onAck={setEncAck} />
-                  {transport === "quic" && <QuicObfs value={obfs} onChange={setObfs} />}
+                  {has("quic") && <QuicObfs value={obfs} onChange={setObfs} />}
                   <MuxToggle transport={transport} value={muxOn} onChange={setMuxOn} />
                   <SpreadToggle transport={transport} value={mux} onChange={setMux} />
                   {(muxOn || !MUX_OPTIONAL.includes(transport)) && (
@@ -511,6 +520,11 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
                       <span className="help">{t("wz.portMoved", { first: String(firstTunnelPort(transport)), server: serverName(acceptor), port: suggestedPort })}</span>
                     )}
                     {transport === "auto" && <span className="help">{t("wz.autoPorts", { server: serverName(acceptor), tcp: listenPort, udp: listenPort, ws: String(+listenPort + 1) })}</span>}
+                    {multi && (
+                      <span className="help" dir="auto">
+                        {t("wz.multiPorts", { server: serverName(acceptor), ports: multiPorts(+listenPort, members).map((m) => `${m.transport} ${m.proto} ${m.port}`).join(" · ") })}
+                      </span>
+                    )}
                     {udp && <span className="help">{t("wz.portUdp")}</span>}
                   </div>
                   <div className="field" hidden={!!netId}>
@@ -549,7 +563,7 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
                     {mode === "direct" && <span className="help">{t("wz.directHelp", { server: serverName(acceptor), port: listenPort })}</span>}
                   </div>
                 </div>
-                {transport === "wss" && (
+                {has("wss") && (
                   <TlsChoice
                     value={tls}
                     onChange={setTls}
@@ -561,8 +575,8 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
                     }}
                   />
                 )}
-                {(isWs || (transport === "tcp" && !muxOn) || transport === "shadowtls") && (
-                  <More title={t("more.title")} note={whereNote} show={(step === 2 && !!error && isWs) || !!sni || transport === "shadowtls"}>
+                {(isWs || (transport === "tcp" && !muxOn) || has("shadowtls")) && (
+                  <More title={t("more.title")} note={whereNote} show={(step === 2 && !!error && isWs) || !!sni || has("shadowtls")}>
                     <div className="grid-2 wz-grid">
                       {isWs && (
                         <div className="field">
@@ -577,14 +591,14 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
                           <span className="help">{t("wz.wsHostHelp")}</span>
                         </div>
                       )}
-                      {transport === "wss" && tls.mode === "self" && (
+                      {has("wss") && tls.mode === "self" && (
                         <div className="field">
                           <label htmlFor="wz-sni">{t("wz.sni")}</label>
                           <input className="text mono" id="wz-sni" dir="ltr" value={sni} placeholder="www.example.com" onChange={(e) => setSni(e.target.value.trim())} />
                           <span className="help">{t("wz.sniHelp")}</span>
                         </div>
                       )}
-                      {transport === "shadowtls" && (
+                      {has("shadowtls") && (
                         <div className="field">
                           <label htmlFor="wz-sths">{t("wz.shadowtls.handshake")}</label>
                           <input className="text mono" id="wz-sths" dir="ltr" value={stHandshake} placeholder="www.microsoft.com:443" onChange={(e) => setStHandshake(e.target.value.trim())} />
@@ -668,7 +682,7 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
                           <dl className="kv">
                             <dt>{t("wz.transport")}</dt>
                             <dd>
-                              <span className="mono">{transportLabel(joinTransport(transport, muxOn).core)}</span> · {t(`wz.mode.${mode}`)} · {t(`wz.pf.${profile}`)}
+                              <span className="mono">{transportLabel(joinTransport(transport, muxOn).core, multi ? members.join("+") : undefined)}</span> · {t(`wz.mode.${mode}`)} · {t(`wz.pf.${profile}`)}
                             </dd>
                             <dt>{t(accepts ? "td.listen" : "wz.review.dials")}</dt>
                             <dd className="mono" dir="ltr">

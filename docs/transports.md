@@ -28,6 +28,7 @@ flowchart TD
 | `dns` | the same encrypted KCP, wrapped in DNS query/response messages over UDP 53 | only DNS passes; a direct server-to-server link |
 | `grpc` | the tunnel as a bidirectional gRPC call over HTTP/2 (cleartext h2c in this phase) | behind a CDN or reverse proxy that speaks gRPC |
 | `xhttp` | the tunnel streamed over an HTTP/1.1 request/response with chunked bodies | only HTTP passes, or behind an HTTP CDN/proxy |
+| [`multi`](#multi) | several of the above at once, each on its own port, one tunnel | no single way is reliable; to spread the load over several paths |
 
 Everything except `quic` runs the same layers on top: the handshake (mutual
 authentication with the token, X25519 for forward secrecy), AEAD records, and mux.
@@ -385,6 +386,54 @@ a reconnect. The status shows `kcp+tcpmux+ws` while all three are up.
 The unit spread is one connection or flow, not packets: a single download still runs over one
 path, and many users together use all of them. Only the dialing side changes, but the panel
 writes the setting to both sides, so both servers need 1.0.0.
+
+## `multi`
+
+`transport = "multi"` is several tunnels in one: you pick the transports, and the tunnel runs
+all of them at the same time, each on a port of its own. It is the `spread` of `auto` with the
+list in your hands.
+
+```toml
+[tunnel]
+transport = "multi"
+listen = "0.0.0.0:8443"        # the dialing side: remote = "ENTRY_SERVER_IP:8443"
+
+[tunnel.multi]
+transports = ["tcp", "ws", "xhttp"]
+# ports = [8443, 8080, 2053]   # optional, one per transport
+```
+
+| Transport | Port (from the list above) |
+|---|---|
+| `tcp` | TCP 8443, the tunnel's port |
+| `ws` | TCP 8444, the next one |
+| `xhttp` | TCP 8445, the one after |
+
+Each transport takes the tunnel's port plus its place in the list, unless `ports` lists them
+(one per transport, all different). The dialing side keeps sessions over every one of them
+(`mux.connections` shared out over them, at least one each), and each new user connection or
+UDP flow goes to the session with the shortest expected wait, as with `spread`: a faster path
+takes more, and a path whose pings stop is avoided at once. When a network blocks one
+transport, its sessions close and the others carry on. The status shows them all, sorted,
+while they are up, for example `tcpmux+ws+xhttp`.
+
+- **What can be in the list:** two to eight of `tcp`, `tcpmux`, `ws`, `wss`, `quic`, `kcp`,
+  `dns`, `grpc`, `xhttp` and `shadowtls`, each once. `tcp` is `tcpmux` here: a multi tunnel
+  always multiplexes (`[tunnel.mux] enabled = false` is refused). The raw-socket ones (`paqet`,
+  `spoof`, `icmp`) and `auto` cannot be members.
+- **Settings:** each member reads its own table as it would alone — `[tunnel.ws]` for `ws` /
+  `wss` (one path for both), `[tunnel.tls]` for `wss`, `[tunnel.quic]` for `quic`,
+  `[tunnel.kcp]` for `kcp` and `dns`, `[tunnel.shadowtls]` for `shadowtls` — and a table that
+  no member reads is refused. `encryption` applies to every member except `quic`, which
+  has TLS 1.3 of its own. `mux.spread` belongs to `auto` and is refused here.
+- **Both sides** must have the same list (and `ports`). Open every port on the listening
+  side, UDP for `quic`, `kcp` and `dns`. `wormhole check` prints each member with its address.
+- As with `spread`, the unit is one connection or flow, not packets: one download runs over
+  one path, and many users together use all of them.
+
+In the panel, pick `multi` as the transport in the wizard or the tunnel editor and tap the
+transports to run; their ports are listed under the port field. Both servers need 1.2.0.
+Sample configs: `configs/entry-multi.toml`, `configs/exit-multi.toml`.
 
 ## `spoof`
 

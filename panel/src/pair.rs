@@ -46,6 +46,10 @@ pub struct PairRequest {
     /// sides.
     #[serde(default)]
     pub shadowtls_handshake: Option<String>,
+    /// `multi` only: the transports it runs at once (two to eight), each on the next port
+    /// after the tunnel's, the same on both sides.
+    #[serde(default)]
+    pub multi: Option<Vec<String>>,
     /// Mux settings, the same on both sides; left out, the profile's apply.
     #[serde(default)]
     pub mux: Option<crate::wire::MuxSpec>,
@@ -153,9 +157,9 @@ impl PairRequest {
             remote: (!accepts).then(|| self.dial.clone()),
             token: token.map(str::to_owned),
             pool: self.pool,
-            ws_path: self.ws_path.clone(),
+            ws_path: self.reads_ws().then(|| self.ws_path.clone()).flatten(),
             ws_mode: self.ws_mode_field(),
-            ws_host: self.ws_host.clone(),
+            ws_host: self.reads_ws().then(|| self.ws_host.clone()).flatten(),
             mux: self.mux.clone().filter(|m| !m.is_empty()),
             kcp: kcp.clone(),
             spoof: self.spoof_for(role),
@@ -168,14 +172,19 @@ impl PairRequest {
                 .then(|| self.proxy_version().map(str::to_owned))
                 .flatten(),
             tls_sni: (!accepts).then(|| self.dial_sni()).flatten(),
-            shadowtls_handshake: self.shadowtls_handshake.clone(),
-            tls_pin: (!accepts && self.transport == "wss" && self.tls_cert.is_none())
+            shadowtls_handshake: (self.transport != "multi" || self.runs("shadowtls"))
+                .then(|| self.shadowtls_handshake.clone())
+                .flatten(),
+            multi: (self.transport == "multi")
+                .then(|| self.multi.clone())
+                .flatten(),
+            tls_pin: (!accepts && self.runs("wss") && self.tls_cert.is_none())
                 .then(|| pin.map(str::to_owned))
                 .flatten(),
-            tls_cert: (accepts && self.transport == "wss")
+            tls_cert: (accepts && self.runs("wss"))
                 .then(|| self.tls_cert.clone())
                 .flatten(),
-            tls_key: (accepts && self.transport == "wss")
+            tls_key: (accepts && self.runs("wss"))
                 .then(|| self.tls_key.clone())
                 .flatten(),
             forwards: if role == "entry" {
@@ -192,7 +201,7 @@ impl PairRequest {
     /// WebSocket Host, an address that is not the certificate's) makes the dialing side
     /// refuse the certificate (`BadCertificate`).
     fn dial_sni(&self) -> Option<String> {
-        if self.transport == "wss" && self.tls_cert.is_some() {
+        if self.runs("wss") && self.tls_cert.is_some() {
             if let Some(host) = self
                 .tls_host
                 .as_deref()
@@ -227,27 +236,27 @@ impl PairRequest {
 
     /// Whether this is an `icmp` tunnel (KCP in ICMP echo over a raw socket).
     fn needs_icmp(&self) -> bool {
-        self.transport == "icmp"
+        self.runs("icmp")
     }
 
     /// Whether this is a `dns` tunnel (KCP in DNS query/response over UDP).
     fn needs_dns(&self) -> bool {
-        self.transport == "dns"
+        self.runs("dns")
     }
 
     /// Whether this is a `grpc` tunnel (a tunnel stream over gRPC/HTTP-2).
     fn needs_grpc(&self) -> bool {
-        self.transport == "grpc"
+        self.runs("grpc")
     }
 
     /// Whether this is an `xhttp` tunnel (the tunnel over streaming HTTP/1.1).
     fn needs_xhttp(&self) -> bool {
-        self.transport == "xhttp"
+        self.runs("xhttp")
     }
 
     /// Whether this is a `shadowtls` tunnel (camouflage TLS to a real site).
     fn needs_shadowtls(&self) -> bool {
-        self.transport == "shadowtls"
+        self.runs("shadowtls")
     }
 
     /// A Paqet tunnel listens on every IPv4 address (`0.0.0.0`), as the other transports
@@ -307,7 +316,7 @@ impl PairRequest {
 
     /// Whether the tunnel's QUIC packets are sealed.
     fn sealed(&self) -> bool {
-        self.quic_obfs && self.transport == "quic"
+        self.quic_obfs && self.runs("quic")
     }
 
     /// The per-address limit to write on the entry side, if there is one.
@@ -319,7 +328,7 @@ impl PairRequest {
     /// (files that are not from the manager's Let's Encrypt), which agents take from
     /// [`OWN_CERT_SINCE`].
     fn own_cert(&self) -> bool {
-        self.transport == "wss"
+        self.runs("wss")
             && self
                 .tls_cert
                 .as_deref()
@@ -463,6 +472,9 @@ impl PairRequest {
             bail!("old_agent_xhttp:{id}:{version}");
         }
         // The shadowtls transport came with 1.2.0; both sides take part.
+        if self.needs_multi() && !release_at_least(version, MULTI_SINCE) {
+            bail!("old_agent_multi:{id}:{version}");
+        }
         if self.needs_shadowtls() && !release_at_least(version, SHADOWTLS_SINCE) {
             bail!("old_agent_shadowtls:{id}:{version}");
         }
@@ -478,6 +490,30 @@ impl PairRequest {
             ("ws" | "wss", "httpupgrade") | ("wss", "tls")
         );
         ok.then(|| mode.to_owned())
+    }
+
+    /// Whether the tunnel runs `transport`: as its transport, or as one of a `multi`
+    /// tunnel's.
+    fn runs(&self, transport: &str) -> bool {
+        self.transport == transport
+            || (self.transport == "multi"
+                && self
+                    .multi
+                    .iter()
+                    .flatten()
+                    .any(|m| m == transport || (transport == "tcpmux" && m == "tcp")))
+    }
+
+    /// Whether `[tunnel.ws]` is written: always for a single transport (the wizard sends it
+    /// only for `ws`/`wss`), and for `multi` only when a member is `ws` or `wss` (the core
+    /// refuses a table no member reads).
+    fn reads_ws(&self) -> bool {
+        self.transport != "multi" || self.runs("ws") || self.runs("wss")
+    }
+
+    /// Whether this is a `multi` tunnel (several transports at once).
+    fn needs_multi(&self) -> bool {
+        self.transport == "multi"
     }
 
     /// Whether the tunnel keeps sessions over all of auto's transports at once.
@@ -512,7 +548,7 @@ impl PairRequest {
                 bail!("bad_encryption");
             }
             // QUIC is always TLS 1.3: a cipher of its own does not exist there.
-            if self.transport == "quic" && e != "auto" {
+            if self.runs("quic") && e != "auto" {
                 bail!("encryption_quic");
             }
         }
@@ -533,6 +569,33 @@ impl PairRequest {
             bail!("spread_auto_only");
         }
         self.validate_spoof()?;
+        self.validate_multi()?;
+        Ok(())
+    }
+
+    /// Checks a `multi` tunnel's transports before anything is written: two to eight of
+    /// the ones the panel offers for it, none twice. The core checks them too.
+    fn validate_multi(&self) -> Result<()> {
+        let Some(members) = self.multi.as_ref().filter(|_| self.transport == "multi") else {
+            if self.transport == "multi" {
+                bail!("multi_needs_transports");
+            }
+            return Ok(());
+        };
+        if !(2..=8).contains(&members.len()) {
+            bail!("multi_count");
+        }
+        let mut seen: Vec<&str> = Vec::new();
+        for m in members {
+            let m = if m == "tcp" { "tcpmux" } else { m.as_str() };
+            if !MULTI_MEMBERS.contains(&m) {
+                bail!("multi_bad_transport");
+            }
+            if seen.contains(&m) {
+                bail!("multi_twice");
+            }
+            seen.push(m);
+        }
         Ok(())
     }
 
@@ -633,6 +696,23 @@ pub const XHTTP_SINCE: &str = "1.2.0";
 
 /// The first release with the `shadowtls` transport (camouflage TLS to a real site).
 pub const SHADOWTLS_SINCE: &str = "1.2.0";
+
+/// The transports the panel offers as `multi` members: the ones that need no root, raw
+/// socket or per-side addresses (`paqet`, `spoof`, `icmp` stay single-transport here).
+pub const MULTI_MEMBERS: [&str; 9] = [
+    "tcpmux",
+    "ws",
+    "wss",
+    "quic",
+    "kcp",
+    "dns",
+    "grpc",
+    "xhttp",
+    "shadowtls",
+];
+
+/// The release that brought the `multi` transport (several transports in one tunnel).
+pub const MULTI_SINCE: &str = "1.2.0";
 
 /// A `paqet` tunnel's `[tunnel.kcp]` table, and only its: an empty table is the same as
 /// none, and another transport never gets the table (the core refuses it there).
@@ -1810,6 +1890,7 @@ mod tests {
                     active: Some(true),
                     status: None,
                     error: None,
+                    multi: None,
                 },
             )
         };
@@ -1827,6 +1908,7 @@ mod tests {
             ws_mode: None,
             ws_host: None,
             shadowtls_handshake: None,
+            multi: None,
             tls_sni: None,
             mux: None,
             tls_cert: None,
@@ -1886,6 +1968,7 @@ mod tests {
             ws_mode: None,
             ws_host: None,
             shadowtls_handshake: None,
+            multi: None,
             tls_sni: None,
             mux: None,
             tls_cert: None,
@@ -1937,6 +2020,44 @@ mod tests {
     }
 
     #[test]
+    fn a_multi_tunnel_checks_its_transports_and_pins_its_wss_member() {
+        let req = |members: &[&str]| PairRequest {
+            name: "m".into(),
+            entry: "a".into(),
+            exit: "b".into(),
+            mode: "direct".into(),
+            transport: "multi".into(),
+            listen: "0.0.0.0:443".into(),
+            dial: "203.0.113.5:443".into(),
+            ws_path: Some("/p".into()),
+            multi: Some(members.iter().map(|m| (*m).to_owned()).collect()),
+            ..Default::default()
+        };
+        assert!(req(&["xhttp", "tcp", "wss"]).validate().is_ok());
+        for (members, code) in [
+            (&["ws"][..], "multi_count"),
+            (&["tcp", "tcpmux"][..], "multi_twice"),
+            (&["ws", "paqet"][..], "multi_bad_transport"),
+            (&["ws", "auto"][..], "multi_bad_transport"),
+        ] {
+            let err = req(members).validate().unwrap_err().to_string();
+            assert_eq!(err, code, "{members:?}");
+        }
+        // The wss member: the dialing side pins the listener's certificate, the listening
+        // side serves one; [tunnel.ws] is written because a member reads it.
+        let pin = "ab".repeat(32);
+        let (entry, exit) = req(&["xhttp", "wss"]).specs(None, Some(&pin));
+        assert_eq!(entry.tls_pin.as_deref(), Some(pin.as_str()));
+        assert_eq!(exit.tls_pin, None);
+        assert_eq!(entry.multi, Some(vec!["xhttp".into(), "wss".into()]));
+        assert_eq!(entry.ws_path.as_deref(), Some("/p"));
+        // No ws member: no [tunnel.ws], which the core would refuse.
+        let (entry, _) = req(&["xhttp", "tcp"]).specs(None, None);
+        assert_eq!(entry.ws_path, None);
+        assert_eq!(entry.tls_pin, None);
+    }
+
+    #[test]
     fn sealed_quic_is_for_quic_only_and_needs_a_new_agent() {
         let req = |transport: &str, obfs: bool| PairRequest {
             name: "t".into(),
@@ -1952,6 +2073,7 @@ mod tests {
             ws_mode: None,
             ws_host: None,
             shadowtls_handshake: None,
+            multi: None,
             tls_sni: None,
             mux: None,
             encryption: None,
@@ -1997,6 +2119,7 @@ mod tests {
             ws_mode: None,
             ws_host: None,
             shadowtls_handshake: None,
+            multi: None,
             tls_sni: None,
             mux: max_streams.map(|v| crate::wire::MuxSpec {
                 max_streams: Some(v),
@@ -2049,6 +2172,7 @@ mod tests {
             ws_mode: None,
             ws_host: None,
             shadowtls_handshake: None,
+            multi: None,
             tls_sni: None,
             mux: None,
             encryption: None,
@@ -2134,6 +2258,7 @@ mod tests {
             ws_mode: None,
             ws_host: None,
             shadowtls_handshake: None,
+            multi: None,
             tls_sni: None,
             mux: None,
             encryption: None,
@@ -2198,6 +2323,7 @@ mod tests {
             ws_mode: None,
             ws_host: None,
             shadowtls_handshake: None,
+            multi: None,
             tls_sni: None,
             mux,
             quic_obfs: false,
@@ -2260,6 +2386,7 @@ mod tests {
             ws_mode: None,
             ws_host: ws_host.map(str::to_owned),
             shadowtls_handshake: None,
+            multi: None,
             tls_sni: sni.map(str::to_owned),
             mux: None,
             encryption: None,

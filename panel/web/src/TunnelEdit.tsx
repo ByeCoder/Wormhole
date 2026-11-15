@@ -10,6 +10,7 @@ import { MuxFields, MuxToggle, SpreadToggle, muxFromSpec, muxSpecOf, muxToSpec }
 import { TlsChoice, emptyTls, isLetsEncrypt, tlsReady } from "./TlsChoice";
 import { EncryptionChoice, cipherOf, cipherReady } from "./EncryptionChoice";
 import { QuicObfs, obfsOf } from "./QuicObfs";
+import { MultiPicker, membersReady, readMembers } from "./MultiPicker";
 import { KcpFields, emptyKcp, kcpFromSpec, kcpSpecOf, kcpToSpec } from "./PaqetFields";
 import { SpoofFields, emptySpoof, spoofFromPair, spoofToPair } from "./SpoofFields";
 import { PerIpLimit, perIpOf } from "./PerIpLimit";
@@ -18,7 +19,7 @@ import { ProxyProtocol, proxyFromSpec, proxyOf } from "./ProxyProtocol";
 import type { ProxyChoice } from "./ProxyProtocol";
 import { GreChoice, linkWithAddress } from "./GreChoice";
 import { useNetworks } from "./Networks";
-import { MUX_OPTIONAL, TRANSPORTS, joinTransport, splitTransport } from "./transport";
+import { MUX_OPTIONAL, TRANSPORTS, joinTransport, multiPorts, runsTransport, splitTransport } from "./transport";
 import { WsModeChoice, readWsMode, wsModeField } from "./WsMode";
 import type { WsMode } from "./WsMode";
 import { PROFILES, addressesOf, hostOf, parsePorts, portOf } from "./Wizard";
@@ -60,6 +61,11 @@ export function TunnelEdit({ tunnel, servers, preset, onBack }: { tunnel: Tunnel
   const [attempt, setAttempt] = useState(0);
   const [mode, setMode] = useState("reverse");
   const [transport, setTransport] = useState("tcp");
+  // A multi tunnel's transports, in port order.
+  const [members, setMembers] = useState<string[]>(readMembers(undefined));
+  const multi = transport === "multi";
+  // Whether the tunnel runs `x`: as its transport, or as one of a multi tunnel's.
+  const has = (x: string) => runsTransport(transport, members, x);
   const [muxOn, setMuxOn] = useState(true);
   const [profile, setProfile] = useState("balanced");
   const [listenHost, setListenHost] = useState("0.0.0.0");
@@ -102,7 +108,7 @@ export function TunnelEdit({ tunnel, servers, preset, onBack }: { tunnel: Tunnel
   const acceptor = mode === "reverse" ? entry : exit;
   const dialer = mode === "reverse" ? exit : entry;
   const parsed = useMemo(() => parsePorts(ports, protocol, target.trim() || "127.0.0.1"), [ports, protocol, target]);
-  const isWs = transport === "ws" || transport === "wss";
+  const isWs = has("ws") || has("wss");
   const choices = (() => {
     const s = servers.find((x) => x.id === acceptor);
     return s ? addressesOf(s) : [];
@@ -139,6 +145,7 @@ export function TunnelEdit({ tunnel, servers, preset, onBack }: { tunnel: Tunnel
         setMode(a.mode);
         const split = splitTransport(a.transport || b.transport, a.mux ?? b.mux);
         setTransport(split.transport);
+        setMembers(readMembers(a.multi ?? b.multi));
         setMuxOn(split.mux);
         setProfile(a.profile ?? "balanced");
         setLoadedHost(hostOf(acc.listen));
@@ -250,21 +257,22 @@ export function TunnelEdit({ tunnel, servers, preset, onBack }: { tunnel: Tunnel
     ws_path: isWs ? wsPath : undefined,
     ws_mode: wsModeField(transport, wsMode),
     ws_host: isWs && wsHost.trim() ? wsHost.trim() : undefined,
-    tls_sni: transport === "wss" && tls.mode === "self" && sni.trim() ? sni.trim() : undefined,
-    shadowtls_handshake: transport === "shadowtls" && stHandshake.trim() ? stHandshake.trim() : undefined,
+    tls_sni: has("wss") && tls.mode === "self" && sni.trim() ? sni.trim() : undefined,
+    shadowtls_handshake: has("shadowtls") && stHandshake.trim() ? stHandshake.trim() : undefined,
     mux: muxSpecOf(mux, transport, muxOn),
     kcp: kcpSpecOf(kcp, transport, profile),
     spoof: spoofOn ? spoofToPair(spoof).spoof : undefined,
     encryption: cipherOf(enc, transport),
-    quic_obfs: obfsOf(obfs, transport),
+    quic_obfs: obfsOf(obfs, has("quic") ? "quic" : transport),
     max_conns_per_ip: perIpOf(perIp).value,
     udp_max_flows: protocol.includes("udp") ? udpFlowsOf(udpFlows).value : undefined,
     proxy_protocol: proxyOf(proxy, protocol),
-    tls_cert: transport === "wss" && tls.mode !== "self" && tls.cert ? tls.cert : undefined,
-    tls_key: transport === "wss" && tls.mode !== "self" && tls.key ? tls.key : undefined,
-    tls_host: transport === "wss" && tls.mode !== "self" && tls.cert && tls.host ? tls.host.toLowerCase() : undefined,
+    tls_cert: has("wss") && tls.mode !== "self" && tls.cert ? tls.cert : undefined,
+    tls_key: has("wss") && tls.mode !== "self" && tls.key ? tls.key : undefined,
+    tls_host: has("wss") && tls.mode !== "self" && tls.cert && tls.host ? tls.host.toLowerCase() : undefined,
     rotate: rotate ? true : undefined,
     forwards: parsed.forwards,
+    multi: multi ? members : undefined,
   });
 
   // What was loaded, to tell whether anything changed.
@@ -320,7 +328,8 @@ export function TunnelEdit({ tunnel, servers, preset, onBack }: { tunnel: Tunnel
     if (!dialHost.trim() && !netId) return t("wz.dial", { server: serverName(acceptor), other: serverName(dialer) });
     if ((transport === "paqet" || transport === "icmp") && isV6(dialHost)) return t("paqet.ip");
     if (isWs && !wsPath.startsWith("/")) return t("wz.wsPath");
-    if (transport === "wss" && !tlsReady(tls)) return t(tls.mode === "own" ? "tls.needOwn" : "tls.needCert");
+    if (multi && !membersReady(members)) return t("wz.multi.need2");
+    if (has("wss") && !tlsReady(tls)) return t(tls.mode === "own" ? "tls.needOwn" : "tls.needCert");
     if (!cipherReady(enc, transport, encAck)) return t("enc.needAck");
     if (parsed.bad !== undefined) return parsed.bad ? t("wz.badPorts", { bit: parsed.bad }) : t("wz.ports");
     if (muxSpec.bad) return `${t(`mux.${muxSpec.bad}`)}: ${t("mux.badValue")}`;
@@ -352,13 +361,13 @@ export function TunnelEdit({ tunnel, servers, preset, onBack }: { tunnel: Tunnel
   const moreNote = noteOf(
     [
       transport !== "quic" && enc !== "auto" && t(`enc.${enc}`),
-      transport === "quic" && obfs && "obfs",
+      has("quic") && obfs && "obfs",
       MUX_OPTIONAL.includes(transport) && !muxOn && pairOf("mux", t("mux.off")),
       !!muxSpec.spec && t("mux.title"),
       transport === "paqet" && !!kcpSpec.spec && pairOf(t("kcp.title"), t("kcp.custom")),
       isWs && wsPath !== "/" && pairOf(t("wz.wsPath"), wsPath),
       isWs && wsHost && pairOf("Host", wsHost),
-      transport === "wss" && tls.mode === "self" && sni && pairOf("SNI", sni),
+      has("wss") && tls.mode === "self" && sni && pairOf("SNI", sni),
       transport === "tcp" && !muxOn && pool !== undefined && pairOf(t("wz.pool"), pool),
       perIp && pairOf(t("perip.title"), perIp),
       udpPorts && udpFlows && pairOf(t("udpflows.title"), udpFlows),
@@ -472,6 +481,7 @@ export function TunnelEdit({ tunnel, servers, preset, onBack }: { tunnel: Tunnel
             <Choice label={t("wz.transport")} mono value={transport} options={TRANSPORTS.map((x) => [x, x])} onChange={setTransport} hint={t(`wz.tr.${transport}`)}>
               {joinTransport(transport, muxOn).core !== tunnel.transport && <span className="help warn-text">{t("te.transportChange")}</span>}
             </Choice>
+            {multi && <MultiPicker value={members} onChange={setMembers} port={listenPort} />}
             <WsModeChoice transport={transport} value={wsMode} onChange={setWsMode} />
             <Choice label={t("wz.profile")} value={profile} options={PROFILES.map((x) => [x, t(`wz.pf.${x}`)])} onChange={setProfile} hint={t(`wz.pf.${profile}.d`)} />
           </fieldset>
@@ -486,6 +496,11 @@ export function TunnelEdit({ tunnel, servers, preset, onBack }: { tunnel: Tunnel
                 <label htmlFor="te-port">{t("wz.port", { server: serverName(acceptor) })}</label>
                 <input className="text mono" id="te-port" dir="ltr" inputMode="numeric" value={listenPort} onChange={(e) => setListenPort(e.target.value.trim())} />
                 {transport === "auto" && <span className="help">{t("wz.autoPorts", { server: serverName(acceptor), tcp: listenPort, udp: listenPort, ws: String(+listenPort + 1) })}</span>}
+                {multi && (
+                  <span className="help" dir="auto">
+                    {t("wz.multiPorts", { server: serverName(acceptor), ports: multiPorts(+listenPort, members).map((m) => `${m.transport} ${m.proto} ${m.port}`).join(" · ") })}
+                  </span>
+                )}
                 {(transport === "quic" || transport === "kcp" || transport === "dns") && <span className="help">{t("wz.portUdp")}</span>}
               </div>
               <div className="field" hidden={!!netId}>
@@ -504,7 +519,7 @@ export function TunnelEdit({ tunnel, servers, preset, onBack }: { tunnel: Tunnel
                 {mode === "direct" && <span className="help">{t("wz.directHelp", { server: serverName(acceptor), port: listenPort })}</span>}
               </div>
             </div>
-            {transport === "wss" && <TlsChoice value={tls} onChange={setTls} server={acceptor} serverName={serverName(acceptor)} onHost={(h) => setDialHost(h)} />}
+            {has("wss") && <TlsChoice value={tls} onChange={setTls} server={acceptor} serverName={serverName(acceptor)} onHost={(h) => setDialHost(h)} />}
           </fieldset>
 
           <fieldset className="card edit-sec" disabled={locked}>
@@ -544,7 +559,7 @@ export function TunnelEdit({ tunnel, servers, preset, onBack }: { tunnel: Tunnel
               <div className="more-group">
                 <h4 className="more-h">{t("te.how")}</h4>
                 <EncryptionChoice value={enc} onChange={setEnc} transport={transport} ack={encAck} onAck={setEncAck} />
-                {transport === "quic" && <QuicObfs value={obfs} onChange={setObfs} />}
+                {has("quic") && <QuicObfs value={obfs} onChange={setObfs} />}
                 <MuxToggle transport={transport} value={muxOn} onChange={setMuxOn} />
                 <SpreadToggle transport={transport} value={mux} onChange={setMux} />
                 {(muxOn || !MUX_OPTIONAL.includes(transport)) && (
@@ -563,7 +578,7 @@ export function TunnelEdit({ tunnel, servers, preset, onBack }: { tunnel: Tunnel
                   </More>
                 )}
               </div>
-              {(isWs || (transport === "tcp" && !muxOn) || transport === "shadowtls") && (
+              {(isWs || (transport === "tcp" && !muxOn) || has("shadowtls")) && (
                 <div className="more-group">
                   <h4 className="more-h">{t("te.where")}</h4>
                   <div className="grid-2">
@@ -580,14 +595,14 @@ export function TunnelEdit({ tunnel, servers, preset, onBack }: { tunnel: Tunnel
                         <span className="help">{t("wz.wsHostHelp")}</span>
                       </div>
                     )}
-                    {transport === "wss" && tls.mode === "self" && (
+                    {has("wss") && tls.mode === "self" && (
                       <div className="field">
                         <label htmlFor="te-sni">{t("wz.sni")}</label>
                         <input className="text mono" id="te-sni" dir="ltr" value={sni} placeholder="www.example.com" onChange={(e) => setSni(e.target.value.trim())} />
                         <span className="help">{t("wz.sniHelp")}</span>
                       </div>
                     )}
-                    {transport === "shadowtls" && (
+                    {has("shadowtls") && (
                       <div className="field">
                         <label htmlFor="te-sths">{t("wz.shadowtls.handshake")}</label>
                         <input className="text mono" id="te-sths" dir="ltr" value={stHandshake} placeholder="www.microsoft.com:443" onChange={(e) => setStHandshake(e.target.value.trim())} />

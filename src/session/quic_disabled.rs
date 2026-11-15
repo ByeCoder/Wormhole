@@ -14,6 +14,10 @@ pub enum QuicSession {}
 pub enum QuicStream {}
 
 impl QuicSession {
+    pub fn transport(&self) -> Option<&'static str> {
+        match *self {}
+    }
+
     pub fn open(&self, _: Bytes) -> io::Result<QuicStream> {
         match *self {}
     }

@@ -101,6 +101,11 @@ pub enum TransportKind {
     /// The tunnel inside a TLS connection made to look like traffic to a real site, in the
     /// spirit of ShadowTLS/REALITY (the rustls-achievable form). A stream transport.
     Shadowtls,
+    /// Several transports at once, each on a port of its own (`[tunnel.multi]`): sessions
+    /// are kept over every one of them and new user connections and UDP flows are spread
+    /// over all, so no one tunnel carries the whole load and the others carry on when one
+    /// is blocked. Always multiplexed. See `multi.rs`.
+    Multi,
 }
 
 impl TransportKind {
@@ -120,6 +125,7 @@ impl TransportKind {
             Self::Grpc => "grpc",
             Self::Xhttp => "xhttp",
             Self::Shadowtls => "shadowtls",
+            Self::Multi => "multi",
         }
     }
 
@@ -235,6 +241,8 @@ pub struct TunnelConfig {
     pub spoof: Option<SpoofConfig>,
     /// Only for `shadowtls`: the real site to borrow a TLS appearance from.
     pub shadowtls: Option<ShadowtlsConfig>,
+    /// Only for `multi`: the transports it runs at once, and their ports.
+    pub multi: Option<MultiConfig>,
     /// The exit side answers speed test streams (`wormhole speedtest` on the entry side).
     /// They only produce, consume and echo data; they dial nothing.
     #[serde(default = "default_true")]
@@ -254,6 +262,19 @@ pub struct ControlConfig {
 /// `[tunnel.spoof]`: the forged addresses of a `spoof` tunnel. Only read for
 /// `transport = "spoof"`; the core refuses the table for any other transport. `spoof`
 /// reuses every `[tunnel.kcp]` setting of `paqet` for the KCP wire below the carrier.
+/// `[tunnel.multi]`: the transports of a `multi` tunnel, run side by side.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MultiConfig {
+    /// Two to eight transports. `tcp` is the same as `tcpmux` here (every member is
+    /// multiplexed); `auto` and `multi` cannot be members.
+    pub transports: Vec<TransportKind>,
+    /// One port for each transport, in the same order. Left out: the tunnel's own port for
+    /// the first, then the ports after it (+1, +2, ...). Both sides must agree.
+    #[serde(default)]
+    pub ports: Vec<u16>,
+}
+
 /// `[tunnel.shadowtls]`: the camouflage settings of the `shadowtls` transport. The listener
 /// relays unauthenticated connections (active probes) to `handshake`, a real TLS site, so a
 /// prober sees that site; the dialer names a subdomain of the same host as its TLS SNI, so
@@ -927,7 +948,7 @@ impl MuxSettings {
         };
         // A stalled transport is noticed after twice the ping: auto pings fast, to move on
         // to another one in a few seconds.
-        let ping_interval = if transport == TransportKind::Auto {
+        let ping_interval = if matches!(transport, TransportKind::Auto | TransportKind::Multi) {
             Duration::from_secs(crate::auto::PING_SECS)
         } else {
             tuning.keepalive
@@ -1169,6 +1190,13 @@ impl Config {
     }
 
     pub fn validate(&self) -> Result<()> {
+        // A multi tunnel is checked member by member, each as the tunnel it runs as.
+        if self.tunnel.transport == TransportKind::Multi {
+            return self.validate_multi();
+        }
+        if self.tunnel.multi.is_some() {
+            bail!("[tunnel.multi] is only used with transport = \"multi\"");
+        }
         let built_without = match self.tunnel.transport {
             TransportKind::Quic if !cfg!(feature = "quic") => Some("quic"),
             TransportKind::Kcp if !cfg!(feature = "kcp") => Some("kcp"),
@@ -2796,5 +2824,83 @@ keepalive_secs = 1
             ));
             assert!(err.contains(expect), "{extra}: {err}");
         }
+    }
+
+    #[test]
+    fn multi_runs_each_transport_on_a_port_of_its_own() {
+        let multi = "[tunnel.multi]\ntransports = [\"xhttp\", \"tcp\", \"wss\"]";
+        let c = Config::parse(&with_transport("entry", "multi", multi)).unwrap();
+        let members = c.multi_members().unwrap();
+        assert_eq!(
+            members,
+            vec![
+                (TransportKind::Xhttp, "203.0.113.1:443".to_owned()),
+                (TransportKind::Tcpmux, "203.0.113.1:444".to_owned()),
+                (TransportKind::Wss, "203.0.113.1:445".to_owned()),
+            ]
+        );
+        let mux = c.mux();
+        assert!(mux.enabled, "multi is always multiplexed");
+        assert_eq!(
+            mux.ping_interval,
+            Duration::from_secs(crate::auto::PING_SECS)
+        );
+        // A member runs as that transport alone, with the sections it reads.
+        let wss = c.member(TransportKind::Wss, "203.0.113.1:445");
+        assert_eq!(wss.tunnel.transport, TransportKind::Wss);
+        assert_eq!(wss.tunnel.remote.as_deref(), Some("203.0.113.1:445"));
+        assert!(wss.tunnel.multi.is_none());
+        // Listed ports are taken as they are.
+        let listed = "[tunnel.multi]\ntransports = [\"kcp\", \"ws\"]\nports = [8443, 80]";
+        let c = Config::parse(&with_transport("exit", "multi", listed)).unwrap();
+        assert_eq!(
+            c.multi_members().unwrap(),
+            vec![
+                (TransportKind::Kcp, "0.0.0.0:8443".to_owned()),
+                (TransportKind::Ws, "0.0.0.0:80".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn multi_checks_its_list_and_every_member() {
+        for (extra, expect) in [
+            ("", "needs a [tunnel.multi]"),
+            ("[tunnel.multi]\ntransports = [\"ws\"]", "2 to 8"),
+            (
+                "[tunnel.multi]\ntransports = [\"tcp\", \"tcpmux\"]",
+                "twice",
+            ),
+            (
+                "[tunnel.multi]\ntransports = [\"ws\", \"auto\"]",
+                "cannot contain \"auto\"",
+            ),
+            (
+                "[tunnel.multi]\ntransports = [\"ws\", \"kcp\"]\nports = [80]",
+                "one port for each",
+            ),
+            (
+                "[tunnel.multi]\ntransports = [\"ws\", \"kcp\"]\nports = [80, 80]",
+                "port 80",
+            ),
+            (
+                "[tunnel.mux]\nenabled = false\n[tunnel.multi]\ntransports = [\"ws\", \"kcp\"]",
+                "always uses mux",
+            ),
+            (
+                "[tunnel.multi]\ntransports = [\"ws\", \"xhttp\"]\n[tunnel.kcp]\nmode = \"fast\"",
+                "[tunnel.kcp] is not used",
+            ),
+            // The listening side of wss needs its certificate, as a wss tunnel alone does.
+            (
+                "[tunnel.multi]\ntransports = [\"ws\", \"wss\"]",
+                "member wss",
+            ),
+        ] {
+            let err = parse_err(&with_transport("exit", "multi", extra));
+            assert!(err.contains(expect), "{extra}: {err}");
+        }
+        let stray = "[tunnel.multi]\ntransports = [\"ws\", \"kcp\"]";
+        assert!(parse_err(&with_transport("entry", "tcp", stray)).contains("only used with"));
     }
 }

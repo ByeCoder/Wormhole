@@ -37,11 +37,12 @@ impl Session {
         }
     }
 
-    /// The transport an `auto` tunnel's session runs over; `None` for the others.
+    /// The transport an `auto` or `multi` tunnel's session runs over; `None` for the
+    /// others.
     pub fn transport(&self) -> Option<&'static str> {
         match self {
             Self::Kmux(s) => s.transport(),
-            Self::Quic(_) => None,
+            Self::Quic(s) => s.transport(),
         }
     }
 

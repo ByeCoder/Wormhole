@@ -39,6 +39,8 @@ const MAX_STREAM_FALLBACK: usize = 256 * 1024;
 pub struct QuicSession {
     shared: Arc<Shared>,
     incoming: tokio::sync::Mutex<mpsc::UnboundedReceiver<(QuicStream, Bytes)>>,
+    /// The transport name the status shows (a `multi` member's), once set.
+    transport: std::sync::OnceLock<&'static str>,
 }
 
 struct Shared {
@@ -142,7 +144,20 @@ impl QuicSession {
         Self {
             shared,
             incoming: tokio::sync::Mutex::new(rx),
+            transport: std::sync::OnceLock::new(),
         }
+    }
+
+    /// Names the transport this session runs over, for the status (a `multi` member); a
+    /// plain QUIC tunnel leaves it unset, as other single-transport tunnels do.
+    pub fn named(self, name: &'static str) -> Self {
+        let _ = self.transport.set(name);
+        self
+    }
+
+    /// The name set by [`QuicSession::named`], if any.
+    pub fn transport(&self) -> Option<&'static str> {
+        self.transport.get().copied()
     }
 
     /// Opens a stream starting with `syn`; data may follow at once. Fails (so another

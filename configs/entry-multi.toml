@@ -1,0 +1,28 @@
+# Entry side (Iran), reverse mode over several transports at once: "many tunnels in one".
+# Pair: exit-multi.toml.
+#
+# Each transport in the list runs on a port of its own, from the tunnel's port up in list
+# order (tcp on 8443, ws on 8444, xhttp on 8445 here; or set `ports` to choose them). The exit
+# side keeps sessions over every one of them, and each new user connection or UDP flow goes
+# to the session with the shortest expected wait. If a network blocks one transport, its
+# sessions close and the others carry on. `tcp` here is `tcpmux`: a multi tunnel always
+# multiplexes. Open all of the ports on this server.
+role = "entry"
+mode = "reverse"
+profile = "balanced"
+
+[tunnel]
+transport = "multi"
+listen = "0.0.0.0:8443"
+token = "CHANGE-ME-run-wormhole-token"
+
+[tunnel.multi]
+transports = ["tcp", "ws", "xhttp"]
+# ports = [8443, 8080, 2053]       # optional: one per transport, instead of 8443, 8444, 8445
+
+[[forward]]
+listen = "0.0.0.0:443"
+target = "127.0.0.1:443"
+
+[log]
+level = "info"

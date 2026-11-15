@@ -98,7 +98,9 @@ pub async fn run(config: Config) -> Result<()> {
     }
 
     if transport.kind == TransportKind::Quic {
-        run_quic(&config, &exit, &sessions, &mut tasks).await?;
+        run_quic(&config, &exit, &sessions, &mut tasks, mux.connections, None).await?;
+    } else if transport.kind == TransportKind::Multi {
+        run_multi(&config, &exit, &sessions, &mut tasks).await?;
     } else {
         match config.mode {
             Mode::Reverse if mux.enabled => {
@@ -118,35 +120,8 @@ pub async fn run(config: Config) -> Result<()> {
                     mux.spread,
                     mux.connections,
                 )?;
-                let each_dialer = dialers
-                    .into_iter()
-                    .flat_map(|(dialer, n)| std::iter::repeat(dialer).take(n));
-                for dialer in each_dialer {
-                    let exit = exit.clone();
-                    let connect = {
-                        let (exit, sessions) = (exit.clone(), sessions.clone());
-                        move || {
-                            let (exit, dialer, sessions) =
-                                (exit.clone(), dialer.clone(), sessions.clone());
-                            async move {
-                                let wait = exit.tuning.dial_timeout + exit.tuning.handshake_timeout;
-                                let (link, via) = dialer.connect(&exit.crypto, wait).await?;
-                                let session = MuxSession::over(link, Side::Server, sessions);
-                                if let Some(via) = via {
-                                    session.set_transport(via);
-                                }
-                                Ok(Session::Kmux(session))
-                            }
-                        }
-                    };
-                    let (lifetime, link) = (mux.max_lifetime, exit.stats.peer.clone());
-                    tasks.spawn(async move {
-                        let on_session = move |s| {
-                            tokio::spawn(run_session(exit.clone(), s));
-                        };
-                        maintain("the entry side", link, connect, lifetime, on_session).await;
-                        Ok(())
-                    });
+                for (dialer, n) in dialers {
+                    keep_sessions(&mut tasks, &exit, dialer, n, &sessions, mux.max_lifetime);
                 }
             }
             Mode::Reverse => {
@@ -202,18 +177,23 @@ async fn run_quic(
     _: &Arc<Exit>,
     _: &SessionConfig,
     _: &mut JoinSet<Result<()>>,
+    _: usize,
+    _: Option<&'static str>,
 ) -> Result<()> {
     anyhow::bail!("this build has no QUIC support (the `quic` feature is off)")
 }
 
 /// QUIC, either mode: sessions with the entry side, each served by `run_session`.
-/// Reverse mode keeps `mux.connections` of them up; direct mode accepts them.
+/// Reverse mode keeps `connections` of them up; direct mode accepts them. `config` is the
+/// tunnel's, or a `multi` member's.
 #[cfg(feature = "quic")]
 async fn run_quic(
     config: &Config,
     exit: &Arc<Exit>,
     sessions: &SessionConfig,
     tasks: &mut JoinSet<Result<()>>,
+    connections: usize,
+    name: Option<&'static str>,
 ) -> Result<()> {
     let (tuning, mux) = (config.tuning(), config.mux());
     let quic_config = config.tunnel.quic.clone().unwrap_or_default();
@@ -225,21 +205,21 @@ async fn run_quic(
             let dialer = Arc::new(QuicDialer::new(remote, quic_config.sni.as_deref(), &quic)?);
             info!(
                 remote,
-                connections = mux.connections,
+                connections,
                 congestion = quic_config.congestion.name(),
                 "exit: reverse mode over QUIC, keeping sessions to the entry side"
             );
-            for _ in 0..mux.connections {
+            for _ in 0..connections {
                 let (exit, dialer, sessions) = (exit.clone(), dialer.clone(), sessions.clone());
                 let connect = move || {
                     let (dialer, sessions) = (dialer.clone(), sessions.clone());
                     async move {
                         let conn = dialer.connect().await?;
-                        Ok(Session::Quic(QuicSession::new(
-                            conn,
-                            &sessions,
-                            open_timeout,
-                        )))
+                        let session = QuicSession::new(conn, &sessions, open_timeout);
+                        Ok(Session::Quic(match name {
+                            Some(name) => session.named(name),
+                            None => session,
+                        }))
                     }
                 };
                 let (lifetime, link) = (mux.max_lifetime, exit.stats.peer.clone());
@@ -265,6 +245,10 @@ async fn run_quic(
             let link = exit.stats.peer.clone();
             let on_session = move |session: QuicSession, peer: std::net::SocketAddr| {
                 info!(%peer, "quic session from the entry side established");
+                let session = match name {
+                    Some(name) => session.named(name),
+                    None => session,
+                };
                 let session = Arc::new(Session::Quic(session));
                 exit.stats.peer.session_up(&session);
                 tokio::spawn(run_session(exit.clone(), session));
@@ -274,6 +258,89 @@ async fn run_quic(
                 accept_sessions(listener, sessions, open_timeout, link, on_session).await;
                 Ok(())
             });
+        }
+    }
+    Ok(())
+}
+
+/// Reverse mode with mux: keeps `n` sessions to the entry side up over `dialer`, each
+/// served by `run_session`.
+fn keep_sessions(
+    tasks: &mut JoinSet<Result<()>>,
+    exit: &Arc<Exit>,
+    dialer: Arc<auto::Dial>,
+    n: usize,
+    sessions: &SessionConfig,
+    lifetime: Option<Duration>,
+) {
+    for _ in 0..n {
+        let (exit, dialer) = (exit.clone(), dialer.clone());
+        let connect = {
+            let (exit, sessions) = (exit.clone(), sessions.clone());
+            move || {
+                let (exit, dialer, sessions) = (exit.clone(), dialer.clone(), sessions.clone());
+                async move {
+                    let wait = exit.tuning.dial_timeout + exit.tuning.handshake_timeout;
+                    let (link, via) = dialer.connect(&exit.crypto, wait).await?;
+                    let session = MuxSession::over(link, Side::Server, sessions);
+                    if let Some(via) = via {
+                        session.set_transport(via);
+                    }
+                    Ok(Session::Kmux(session))
+                }
+            }
+        };
+        let link = exit.stats.peer.clone();
+        tasks.spawn(async move {
+            let on_session = move |s| {
+                tokio::spawn(run_session(exit.clone(), s));
+            };
+            maintain("the entry side", link, connect, lifetime, on_session).await;
+            Ok(())
+        });
+    }
+}
+
+/// `transport = "multi"`, either mode: every member transport at once, on its own port.
+/// Reverse mode keeps sessions to the entry side over each; direct mode listens on each.
+/// Every session is served alike, whatever carries it.
+async fn run_multi(
+    config: &Config,
+    exit: &Arc<Exit>,
+    sessions: &SessionConfig,
+    tasks: &mut JoinSet<Result<()>>,
+) -> Result<()> {
+    let (tuning, mux) = (config.tuning(), config.mux());
+    let members = config.multi_members()?;
+    let each = crate::multi::connections_each(mux.connections, members.len());
+    for (kind, addr) in members {
+        let member = config.member(kind, &addr);
+        if kind == TransportKind::Quic {
+            run_quic(&member, exit, sessions, tasks, each, Some("quic")).await?;
+            continue;
+        }
+        let settings = Settings::new(&member.tunnel, member.kcp());
+        match config.mode {
+            Mode::Reverse => {
+                info!(transport = kind.name(), remote = %addr, connections = each, "exit: multi, keeping sessions to the entry side");
+                let dialer = Dialer::new(&settings, &addr, &tuning)?;
+                let dial = Arc::new(auto::Dial::fixed(kind, dialer));
+                keep_sessions(tasks, exit, dial, each, sessions, mux.max_lifetime);
+            }
+            Mode::Direct => {
+                let listener = Listener::bind(&settings, &addr, &tuning)
+                    .await
+                    .with_context(|| {
+                        format!("multi: failed to listen for {} on {addr}", kind.name())
+                    })?;
+                info!(transport = kind.name(), addr = %listener.local_addr()?, "exit: multi, waiting for the entry side");
+                tasks.spawn(accept_direct(
+                    exit.clone(),
+                    listener,
+                    Some(sessions.clone()),
+                    kind.name(),
+                ));
+            }
         }
     }
     Ok(())

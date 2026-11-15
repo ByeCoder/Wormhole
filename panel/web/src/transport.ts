@@ -1,7 +1,18 @@
 import type { MuxSpec } from "./api";
 
 /** The transports a person chooses from. `tcp` with mux on is the core's `tcpmux`; with mux off, plain `tcp`. */
-export const TRANSPORTS = ["auto", "tcp", "ws", "wss", "quic", "kcp", "paqet", "spoof", "icmp", "dns", "grpc", "xhttp", "shadowtls"] as const;
+export const TRANSPORTS = ["auto", "multi", "tcp", "ws", "wss", "quic", "kcp", "paqet", "spoof", "icmp", "dns", "grpc", "xhttp", "shadowtls"] as const;
+
+/** The transports a `multi` tunnel can run together (`tcp` is the core's `tcpmux`: every member is multiplexed). The raw-socket ones (paqet, spoof, icmp) stay single. */
+export const MULTI_MEMBERS = ["tcp", "ws", "wss", "quic", "kcp", "dns", "grpc", "xhttp", "shadowtls"] as const;
+
+/** Whether a tunnel of `transport` (with `multi` members) runs `x`, alone or as a member. */
+export const runsTransport = (transport: string, members: readonly string[], x: string) => transport === x || (transport === "multi" && members.includes(x));
+
+/** The ports a `multi` tunnel listens on from `port`: each member on its own, in order (UDP for quic, kcp and dns). */
+export function multiPorts(port: number, members: readonly string[]): { transport: string; proto: "TCP" | "UDP"; port: number }[] {
+  return members.map((m, i) => ({ transport: m, proto: m === "quic" || m === "kcp" || m === "dns" ? "UDP" : "TCP", port: port + i }));
+}
 
 /** Transports where mux can be turned off (`auto` and `quic` always multiplex). */
 export const MUX_OPTIONAL = ["tcp", "ws", "wss", "kcp", "paqet", "icmp", "dns", "grpc", "xhttp", "shadowtls"];
@@ -48,5 +59,6 @@ export const hostPort = (host: string, port: number | string) => (host.includes(
 /** The transport as a list shows it: `tcpmux` is just tcp, and an auto tunnel says what it uses now. */
 export function transportLabel(core: string, via?: string | null): string {
   if (core === "auto") return via ? `auto → ${via.replace(/tcpmux/g, "tcp")}` : "auto";
+  if (core === "multi") return via ? `multi → ${via.replace(/tcpmux/g, "tcp")}` : "multi";
   return core === "tcpmux" ? "tcp" : core === "tcp" ? "tcp · no mux" : core;
 }
