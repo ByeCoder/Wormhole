@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.2.1 - 2026-11-16
+
+- **Fix:** a `shadowtls` tunnel built in the panel with the handshake site left empty failed
+  with `transport = "shadowtls" needs a [tunnel.shadowtls] section`. The panel now uses
+  `www.microsoft.com:443` when the field is empty, for `shadowtls` alone and as a `multi`
+  member.
+- **Fix:** each transport of a `multi` tunnel now pings at the tunnel's fast pace, so a dead
+  path is noticed in seconds rather than half a minute.
+
 ## 1.2.0 - 2026-11-15
 
 New transports, each a sibling of an existing one, so the handshake, encryption, mux and KCP
