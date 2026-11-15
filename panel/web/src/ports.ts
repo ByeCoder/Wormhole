@@ -20,6 +20,8 @@ export function portsInUse(server: Pick<ServerInfo, "tunnels"> | undefined): Set
     if (own) {
       used.add(own);
       if (tunnel.transport === "auto") used.add(own + 1);
+      // A multi tunnel holds a port for each of its transports.
+      for (let i = 1; i < (tunnel.multi?.length ?? 0); i++) used.add(own + i);
     }
     for (const f of tunnel.forwards ?? []) {
       const fwd = +portOf(f.listen);
@@ -30,8 +32,9 @@ export function portsInUse(server: Pick<ServerInfo, "tunnels"> | undefined): Set
 }
 
 /** The first port from the transport's start that none of the server's tunnels holds, so the second tunnel gets the next one, and none of them meets an error for a port that is taken. */
-export function freeTunnelPort(used: Set<number>, transport: string): number {
-  const free = (p: number) => !used.has(p) && (transport !== "auto" || !used.has(p + 1));
+export function freeTunnelPort(used: Set<number>, transport: string, members = 1): number {
+  const span = transport === "auto" ? 2 : transport === "multi" ? Math.max(members, 1) : 1;
+  const free = (p: number) => Array.from({ length: span }, (_, i) => p + i).every((q) => !used.has(q));
   let port = firstTunnelPort(transport);
   while (port < 65534 && !free(port)) port++;
   return port;

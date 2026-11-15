@@ -417,7 +417,14 @@ impl Stats {
     pub fn new(config: &Config) -> Arc<Self> {
         let mux = config.mux();
         let wanted = if mux.enabled && !config.is_acceptor() {
-            if mux.spread && config.tunnel.transport == crate::config::TransportKind::Auto {
+            if config.tunnel.transport == crate::config::TransportKind::Multi {
+                let n = config
+                    .tunnel
+                    .multi
+                    .as_ref()
+                    .map_or(1, |m| m.transports.len());
+                (crate::multi::connections_each(mux.connections, n) * n) as u64
+            } else if mux.spread && config.tunnel.transport == crate::config::TransportKind::Auto {
                 (crate::auto::spread_connections(mux.connections) * crate::auto::KINDS.len()) as u64
             } else {
                 mux.connections as u64

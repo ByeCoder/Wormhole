@@ -132,6 +132,8 @@ export interface TunnelInfo {
   status: TunnelStatus | null;
   error: string | null;
   rate_mbps: number | null;
+  /** A `multi` tunnel's transports, in port order. */
+  multi?: string[];
   /** The panel's label and place for it (put here by the page from `tunnel_meta`). */
   meta?: TunnelMeta;
 }
@@ -449,6 +451,8 @@ export interface PairRequest {
   ws_host?: string;
   tls_sni?: string;
   shadowtls_handshake?: string;
+  /** `multi`: the transports it runs at once, each on the next port after the tunnel's. */
+  multi?: string[];
   mux?: MuxSpec;
   /** Paqet only: `[tunnel.kcp]` tuning. */
   kcp?: KcpSpec;
@@ -491,6 +495,8 @@ export interface Spec {
   ws_host?: string;
   tls_sni?: string;
   shadowtls_handshake?: string;
+  /** `multi`: the transports it runs at once, each on the next port after the tunnel's. */
+  multi?: string[];
   tls_pin?: string;
   mux?: MuxSpec;
   /** Paqet only: the `[tunnel.kcp]` table that was in the file. */

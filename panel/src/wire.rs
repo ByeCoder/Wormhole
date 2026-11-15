@@ -467,6 +467,10 @@ pub struct Spec {
     /// appearance from), on both sides. Only an agent of 1.2.0 or newer reads it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shadowtls_handshake: Option<String>,
+    /// A `multi` tunnel's `[tunnel.multi] transports`, the same on both sides, each on the
+    /// next port after the tunnel's. Only an agent of 1.2.0 or newer reads it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub multi: Option<Vec<String>>,
     /// A listening wss side: the certificate and key files of a real certificate (made by
     /// [`Request::TunnelCert`], under `/etc/letsencrypt/live/`) instead of a self-signed one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -731,6 +735,9 @@ pub struct TunnelInfo {
     pub status: Option<wormhole::stats::Status>,
     /// Why the file could not be read, if it could not.
     pub error: Option<String>,
+    /// A `multi` tunnel's transports, in port order (the tunnel's port, then the next ones).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub multi: Option<Vec<String>>,
 }
 
 #[cfg(test)]

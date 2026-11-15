@@ -17,6 +17,7 @@ mod channel;
 mod entry;
 mod exit;
 mod limit;
+pub mod multi;
 mod relay;
 pub mod speedtest;
 pub mod stats;

@@ -444,6 +444,14 @@ fn print_summary(config: &Config) {
     if config.tunnel.transport == TransportKind::Auto {
         println!("  auto      : tcpmux, kcp and ws together; the dialing side moves to the one that gets through");
     }
+    if config.tunnel.transport == TransportKind::Multi {
+        if let Ok(members) = config.multi_members() {
+            let each = wormhole::multi::connections_each(mux.connections, members.len());
+            for (kind, addr) in members {
+                println!("  multi     : {} on {addr} ({each} sessions)", kind.name());
+            }
+        }
+    }
     if matches!(
         config.tunnel.transport,
         TransportKind::Kcp | TransportKind::Paqet | TransportKind::Spoof

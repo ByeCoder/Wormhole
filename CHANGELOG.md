@@ -48,6 +48,17 @@ layers above them are unchanged. Both servers need 1.2.0.
   or IPv6. In the panel: pick *ShadowTLS* and fill in the handshake site. Sample configs:
   `configs/entry-shadowtls.toml`, `configs/exit-shadowtls.toml`. Guide:
   [Transports](docs/transports.md#shadowtls).
+- **`multi`** — several tunnels in one. Pick two to eight of `tcp`, `ws`, `wss`, `quic`,
+  `kcp`, `dns`, `grpc`, `xhttp` and `shadowtls` (`[tunnel.multi] transports`); each runs on a
+  port of its own (the tunnel's port, then the next ones, or `ports`), sessions are kept over
+  all of them, and every new connection or UDP flow goes to the one with the shortest expected
+  wait, so no single path carries the whole load and a blocked transport leaves the others
+  running. The generalisation of `auto`'s `spread`, with the list chosen. In the panel: pick
+  `multi` in the tunnel wizard or editor and tap the transports; their ports are listed under
+  the port field. Sample configs: `configs/entry-multi.toml`, `configs/exit-multi.toml`.
+  Guide: [Transports](docs/transports.md#multi).
+- **Fix:** the panel's delete dialog could stay open (and offer to delete again) when the
+  tunnel's page went back to the list before the dialog closed itself.
 
 Private networks:
 

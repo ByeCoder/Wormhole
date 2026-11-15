@@ -78,7 +78,21 @@ pub async fn run(config: Config) -> Result<()> {
     let mut tasks = JoinSet::new();
 
     let source = if transport.kind == TransportKind::Quic {
-        Source::Mux(quic_pool(&config, &crypto, &sessions, &stats, &mut tasks).await?)
+        let pool = Arc::new(SessionPool::default());
+        quic_into(
+            &config,
+            &crypto,
+            &sessions,
+            &stats,
+            &mut tasks,
+            &pool,
+            mux.connections,
+            None,
+        )
+        .await?;
+        Source::Mux(pool)
+    } else if transport.kind == TransportKind::Multi {
+        Source::Mux(multi_pool(&config, &crypto, &sessions, &stats, &mut tasks).await?)
     } else {
         match config.mode {
             Mode::Direct if mux.enabled => {
@@ -99,33 +113,18 @@ pub async fn run(config: Config) -> Result<()> {
                     mux.connections,
                 )?;
                 let pool = Arc::new(SessionPool::default());
-                let each_dialer = dialers
-                    .into_iter()
-                    .flat_map(|(dialer, n)| std::iter::repeat(dialer).take(n));
-                for dialer in each_dialer {
-                    let (crypto, pool) = (crypto.clone(), pool.clone());
-                    let wait = tuning.dial_timeout + tuning.handshake_timeout;
-                    let sessions = sessions.clone();
-                    let connect = move || {
-                        let (dialer, crypto, sessions) =
-                            (dialer.clone(), crypto.clone(), sessions.clone());
-                        async move {
-                            let (link, via) = dialer.connect(&crypto, wait).await?;
-                            let session = MuxSession::over(link, Side::Client, sessions);
-                            if let Some(via) = via {
-                                session.set_transport(via);
-                            }
-                            Ok(Session::Kmux(session))
-                        }
-                    };
-                    let (lifetime, link) = (mux.max_lifetime, stats.peer.clone());
-                    tasks.spawn(async move {
-                        maintain("the exit side", link, connect, lifetime, move |s| {
-                            pool.add(s)
-                        })
-                        .await;
-                        Ok(())
-                    });
+                for (dialer, n) in dialers {
+                    keep_sessions(
+                        &mut tasks,
+                        dialer,
+                        n,
+                        &crypto,
+                        &sessions,
+                        &pool,
+                        &stats,
+                        &tuning,
+                        mux.max_lifetime,
+                    );
                 }
                 Source::Mux(pool)
             }
@@ -175,28 +174,10 @@ pub async fn run(config: Config) -> Result<()> {
                 let hs = tuning.handshake_timeout;
                 if mux.enabled {
                     let pool = Arc::new(SessionPool::default());
-                    let (p, link_stats) = (pool.clone(), stats.peer.clone());
-                    let on_link =
-                        Arc::new(move |link: Link, peer: SocketAddr, via: &'static str| {
-                            let session = MuxSession::over(link, Side::Client, sessions.clone());
-                            if !via.is_empty() {
-                                session.set_transport(via);
-                            }
-                            let session = Arc::new(Session::Kmux(session));
-                            link_stats.session_up(&session);
-                            p.add(session);
-                            info!(%peer, "mux session from the exit side established");
-                        });
                     for (via, listener) in listeners {
-                        let on_link = on_link.clone();
-                        let accept = accept_reverse(
-                            listener,
-                            crypto.clone(),
-                            hs,
-                            stats.clone(),
-                            move |link, peer| on_link(link, peer, via),
+                        accept_into_pool(
+                            &mut tasks, listener, via, &crypto, hs, &stats, &pool, &sessions,
                         );
-                        tasks.spawn(accept);
                     }
                     Source::Mux(pool)
                 } else {
@@ -294,17 +275,20 @@ pub async fn run(config: Config) -> Result<()> {
 /// QUIC, either mode: the pool of QUIC sessions to the exit side. Direct mode keeps
 /// `mux.connections` of them up; reverse mode takes the ones the exit side opens.
 #[cfg(feature = "quic")]
-async fn quic_pool(
+#[allow(clippy::too_many_arguments)]
+async fn quic_into(
     config: &Config,
     crypto: &Crypto,
     sessions: &SessionConfig,
     stats: &Arc<Stats>,
     tasks: &mut JoinSet<Result<()>>,
-) -> Result<Arc<SessionPool>> {
+    pool: &Arc<SessionPool>,
+    connections: usize,
+    name: Option<&'static str>,
+) -> Result<()> {
     let (tuning, mux) = (config.tuning(), config.mux());
     let quic_config = config.tunnel.quic.clone().unwrap_or_default();
     let quic = QuicSettings::new(crypto.psk(), &quic_config, &mux, &tuning)?;
-    let pool = Arc::new(SessionPool::default());
     let open_timeout = tuning.handshake_timeout;
     match config.mode {
         Mode::Direct => {
@@ -312,21 +296,21 @@ async fn quic_pool(
             let dialer = Arc::new(QuicDialer::new(remote, quic_config.sni.as_deref(), &quic)?);
             info!(
                 remote,
-                connections = mux.connections,
+                connections,
                 congestion = quic_config.congestion.name(),
                 "entry: direct mode over QUIC, keeping sessions to the exit side"
             );
-            for _ in 0..mux.connections {
+            for _ in 0..connections {
                 let (dialer, pool, sessions) = (dialer.clone(), pool.clone(), sessions.clone());
                 let connect = move || {
                     let (dialer, sessions) = (dialer.clone(), sessions.clone());
                     async move {
                         let conn = dialer.connect().await?;
-                        Ok(Session::Quic(QuicSession::new(
-                            conn,
-                            &sessions,
-                            open_timeout,
-                        )))
+                        let session = QuicSession::new(conn, &sessions, open_timeout);
+                        Ok(Session::Quic(match name {
+                            Some(name) => session.named(name),
+                            None => session,
+                        }))
                     }
                 };
                 let (lifetime, link) = (mux.max_lifetime, stats.peer.clone());
@@ -350,6 +334,10 @@ async fn quic_pool(
             );
             let (p, link) = (pool.clone(), stats.peer.clone());
             let on_session = move |session: QuicSession, peer: SocketAddr| {
+                let session = match name {
+                    Some(name) => session.named(name),
+                    None => session,
+                };
                 let session = Arc::new(Session::Quic(session));
                 link.session_up(&session);
                 p.add(session);
@@ -362,19 +350,169 @@ async fn quic_pool(
             });
         }
     }
-    Ok(pool)
+    Ok(())
 }
 
 /// Config validation rejects `transport = "quic"` in a build without it.
 #[cfg(not(feature = "quic"))]
-async fn quic_pool(
+#[allow(clippy::too_many_arguments)]
+async fn quic_into(
     _: &Config,
     _: &Crypto,
     _: &SessionConfig,
     _: &Arc<Stats>,
     _: &mut JoinSet<Result<()>>,
-) -> Result<Arc<SessionPool>> {
+    _: &Arc<SessionPool>,
+    _: usize,
+    _: Option<&'static str>,
+) -> Result<()> {
     anyhow::bail!("this build has no QUIC support (the `quic` feature is off)")
+}
+
+/// Keeps `n` mux sessions to the exit side up over `dialer`, adding each to `pool`.
+#[allow(clippy::too_many_arguments)]
+fn keep_sessions(
+    tasks: &mut JoinSet<Result<()>>,
+    dialer: Arc<auto::Dial>,
+    n: usize,
+    crypto: &Crypto,
+    sessions: &SessionConfig,
+    pool: &Arc<SessionPool>,
+    stats: &Arc<Stats>,
+    tuning: &Tuning,
+    lifetime: Option<Duration>,
+) {
+    let wait = tuning.dial_timeout + tuning.handshake_timeout;
+    for _ in 0..n {
+        let (dialer, crypto, pool, sessions) = (
+            dialer.clone(),
+            crypto.clone(),
+            pool.clone(),
+            sessions.clone(),
+        );
+        let connect = move || {
+            let (dialer, crypto, sessions) = (dialer.clone(), crypto.clone(), sessions.clone());
+            async move {
+                let (link, via) = dialer.connect(&crypto, wait).await?;
+                let session = MuxSession::over(link, Side::Client, sessions);
+                if let Some(via) = via {
+                    session.set_transport(via);
+                }
+                Ok(Session::Kmux(session))
+            }
+        };
+        let link = stats.peer.clone();
+        tasks.spawn(async move {
+            maintain("the exit side", link, connect, lifetime, move |s| {
+                pool.add(s)
+            })
+            .await;
+            Ok(())
+        });
+    }
+}
+
+/// Reverse mode with mux: every connection `listener` authenticates becomes a mux session
+/// in `pool`, reported as carried by `via` when it is not empty.
+#[allow(clippy::too_many_arguments)]
+fn accept_into_pool(
+    tasks: &mut JoinSet<Result<()>>,
+    listener: Listener,
+    via: &'static str,
+    crypto: &Crypto,
+    handshake_timeout: Duration,
+    stats: &Arc<Stats>,
+    pool: &Arc<SessionPool>,
+    sessions: &SessionConfig,
+) {
+    let (pool, link_stats, sessions) = (pool.clone(), stats.peer.clone(), sessions.clone());
+    let on_link = move |link: Link, peer: SocketAddr| {
+        let session = MuxSession::over(link, Side::Client, sessions.clone());
+        if !via.is_empty() {
+            session.set_transport(via);
+        }
+        let session = Arc::new(Session::Kmux(session));
+        link_stats.session_up(&session);
+        pool.add(session);
+        info!(%peer, "mux session from the exit side established");
+    };
+    tasks.spawn(accept_reverse(
+        listener,
+        crypto.clone(),
+        handshake_timeout,
+        stats.clone(),
+        on_link,
+    ));
+}
+
+/// `transport = "multi"`, either mode: sessions over every member transport at once, each
+/// on its own port, all in one pool, so new streams are shared over them (see `multi.rs`).
+async fn multi_pool(
+    config: &Config,
+    crypto: &Crypto,
+    sessions: &SessionConfig,
+    stats: &Arc<Stats>,
+    tasks: &mut JoinSet<Result<()>>,
+) -> Result<Arc<SessionPool>> {
+    let (tuning, mux) = (config.tuning(), config.mux());
+    let members = config.multi_members()?;
+    let each = crate::multi::connections_each(mux.connections, members.len());
+    let pool = Arc::new(SessionPool::default());
+    for (kind, addr) in members {
+        let member = config.member(kind, &addr);
+        if kind == TransportKind::Quic {
+            quic_into(
+                &member,
+                crypto,
+                sessions,
+                stats,
+                tasks,
+                &pool,
+                each,
+                Some("quic"),
+            )
+            .await?;
+            continue;
+        }
+        let settings = Settings::new(&member.tunnel, member.kcp());
+        match config.mode {
+            Mode::Direct => {
+                info!(transport = kind.name(), remote = %addr, connections = each, "entry: multi, keeping sessions to the exit side");
+                let dialer = Dialer::new(&settings, &addr, &tuning)?;
+                let dial = Arc::new(auto::Dial::fixed(kind, dialer));
+                keep_sessions(
+                    tasks,
+                    dial,
+                    each,
+                    crypto,
+                    sessions,
+                    &pool,
+                    stats,
+                    &tuning,
+                    mux.max_lifetime,
+                );
+            }
+            Mode::Reverse => {
+                let listener = Listener::bind(&settings, &addr, &tuning)
+                    .await
+                    .with_context(|| {
+                        format!("multi: failed to listen for {} on {addr}", kind.name())
+                    })?;
+                info!(transport = kind.name(), addr = %listener.local_addr()?, "entry: multi, waiting for the exit side");
+                accept_into_pool(
+                    tasks,
+                    listener,
+                    kind.name(),
+                    crypto,
+                    tuning.handshake_timeout,
+                    stats,
+                    &pool,
+                    sessions,
+                );
+            }
+        }
+    }
+    Ok(pool)
 }
 
 /// Reverse mode: authenticates incoming tunnel connections and hands them to

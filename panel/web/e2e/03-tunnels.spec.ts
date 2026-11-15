@@ -41,6 +41,23 @@ async function echoes(port: number, what: string): Promise<boolean> {
   return false;
 }
 
+/** The first of `n` ports in a row that nothing listens on. */
+async function freeRun(n: number): Promise<number> {
+  const open = (port: number) =>
+    new Promise<boolean>((resolve) => {
+      const srv = net.createServer();
+      srv.once("error", () => resolve(false));
+      srv.listen(port, "0.0.0.0", () => srv.close(() => resolve(true)));
+    });
+  for (;;) {
+    const base = await freePort();
+    if (base + n > 65535) continue;
+    let ok = true;
+    for (let i = 1; i < n && ok; i++) ok = await open(base + i);
+    if (ok) return base;
+  }
+}
+
 async function refuses(port: number): Promise<boolean> {
   for (let i = 0; i < 10; i++) {
     const refused = await new Promise<boolean>((resolve) => {
@@ -251,6 +268,58 @@ test.describe("the tunnel", () => {
     await expect(page.locator(".dialog")).toHaveCount(0, { timeout: 10_000 });
     await expect(page.locator(".tunnels tr", { hasText: "demo" })).toHaveCount(0, { timeout: 30_000 });
     expect(await refuses(front), "a deleted tunnel listens nowhere").toBe(true);
+  });
+
+  test("runs several transports at once with multi, and carries traffic over them", async ({ page }) => {
+    const multiFront = await freePort();
+    // tcp, ws and xhttp (the ones it starts with), each on a port of its own: three free in a row
+    const base = await freeRun(3);
+    await signIn(page);
+    await goTo(page, "tunnels");
+    await page.locator(".page-band .btn-primary").click();
+    await page.locator("#wz-name").fill("several");
+    await page.locator(".pick-list").nth(0).locator("button").nth(0).click();
+    await page.locator(".pick-list").nth(1).locator("button").nth(1).click();
+    await next(page);
+    await page.getByRole("button", { name: "multi", exact: true }).click();
+    const picker = page.getByRole("group", { name: "Transports to run together" });
+    await expect(picker.locator('[aria-pressed="true"]')).toHaveCount(3);
+    // one alone is not enough
+    await picker.getByRole("button", { name: "ws", exact: true }).click();
+    await picker.getByRole("button", { name: "xhttp", exact: true }).click();
+    await next(page);
+    await expect(page.getByText("Pick at least two transports").first()).toBeVisible();
+    await picker.getByRole("button", { name: "ws", exact: true }).click();
+    await picker.getByRole("button", { name: "xhttp", exact: true }).click();
+    await next(page);
+    await page.locator("#wz-port").fill(String(base));
+    await expect(page.getByText(`tcp TCP ${base} · ws TCP ${base + 1} · xhttp TCP ${base + 2}`)).toBeVisible();
+    await next(page);
+    await page.locator("#wz-ports").fill(`${multiFront}=${echoPort}`);
+    await next(page); // review
+    await page.locator(".wz-foot .btn-primary").click(); // Build
+    await expect(page.locator(".wz-step p.ok")).toContainText(/Done/i, { timeout: 60_000 });
+    await closeDialog(page);
+    expect(await echoes(multiFront, "over three transports")).toBe(true);
+    // the list says which transports hold sessions now: all three
+    const row = page.locator(".tunnels tr", { hasText: "several" });
+    await expect(row).toContainText("multi → tcp+ws+xhttp", { timeout: 30_000 });
+
+    // and the edit page shows them picked
+    await row.click();
+    await page.getByRole("button", { name: "Edit" }).click();
+    await expect(page.getByRole("group", { name: "Transports to run together" }).locator('[aria-pressed="true"]')).toHaveCount(3);
+    // nothing changed: Save waits, and Cancel goes back
+    await expect(page.locator(".edit-bar .btn-primary")).toBeDisabled();
+    await page.locator(".edit-bar").getByRole("button", { name: "Cancel" }).click();
+
+    const head = page.locator(".hero-route .head");
+    await head.getByRole("button", { name: "More actions" }).click();
+    await head.getByRole("menuitem", { name: "Delete" }).click();
+    await page.locator("#run-confirm").fill("several");
+    await page.locator(".dialog .btn-danger").click();
+    await expect(page.locator(".dialog")).toHaveCount(0, { timeout: 60_000 });
+    expect(await refuses(multiFront), "a deleted tunnel listens nowhere").toBe(true);
   });
 
   test("that cannot connect is undone on both servers and says why", async ({ page }) => {

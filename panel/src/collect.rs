@@ -398,6 +398,7 @@ async fn tunnel(name: &str, path: &Path, services: &dyn Services) -> TunnelInfo 
                 active: None,
                 status: None,
                 error: Some(format!("{e:#}")),
+                multi: None,
             }
         }
     };
@@ -423,6 +424,11 @@ async fn tunnel(name: &str, path: &Path, services: &dyn Services) -> TunnelInfo 
         active,
         status,
         error: None,
+        multi: config
+            .tunnel
+            .multi
+            .as_ref()
+            .map(|m| m.transports.iter().map(|k| k.name().to_owned()).collect()),
     }
 }
 

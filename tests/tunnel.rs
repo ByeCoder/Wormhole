@@ -151,6 +151,8 @@ struct Setup {
     proxy_protocol: &'static str,
     /// `tunnel.ws.mode` (`httpupgrade`, `tls`) on both sides; empty leaves it out.
     ws_mode: &'static str,
+    /// `transport = "multi"`: its `tunnel.multi.transports`, as TOML list items.
+    multi: &'static str,
 }
 
 impl Setup {
@@ -181,7 +183,24 @@ impl Setup {
             timeouts_secs: 0,
             proxy_protocol: "",
             ws_mode: "",
+            multi: "",
         }
+    }
+
+    /// `multi` over `members` (TOML list items, e.g. `"tcp", "ws"`), each on its own port.
+    const fn multi(self, members: &'static str) -> Self {
+        Self {
+            transport: "multi",
+            mux: true,
+            multi: members,
+            ..self
+        }
+    }
+
+    /// Whether the tunnel runs `transport`, alone or as a `multi` member.
+    fn runs(&self, transport: &str) -> bool {
+        self.transport == transport
+            || (self.transport == "multi" && self.multi.contains(&format!("\"{transport}\"")))
     }
 
     const fn ws_mode(self, ws_mode: &'static str) -> Self {
@@ -434,7 +453,10 @@ impl Setup {
         if self.max_streams > 0 {
             options += &format!("max_streams = {}\n", self.max_streams);
         }
-        if self.transport.starts_with("ws") {
+        if self.transport == "multi" {
+            options += &format!("[tunnel.multi]\ntransports = [{}]\n", self.multi);
+        }
+        if self.runs("ws") || self.runs("wss") {
             options += &format!("[tunnel.ws]\npath = \"{}\"\n", self.ws_path);
             if !self.ws_mode.is_empty() {
                 options += &format!("mode = \"{}\"\n", self.ws_mode);
@@ -443,7 +465,7 @@ impl Setup {
                 options += "early_data = true\n";
             }
         }
-        if self.transport == "wss" {
+        if self.runs("wss") {
             let cert = test_cert();
             options += &if listening {
                 format!(
@@ -459,7 +481,7 @@ impl Setup {
                 format!("[tunnel.tls]\nsni = \"tunnel.example\"\npin_sha256 = \"{pin}\"\n")
             };
         }
-        if self.transport == "shadowtls" {
+        if self.runs("shadowtls") {
             // The relay target is only used for unauthenticated probes, not this loopback
             // test; the dialer uses its host (127.0.0.1) as the SNI base.
             options += "[tunnel.shadowtls]\nhandshake = \"localhost:1\"\n";
@@ -648,8 +670,9 @@ async fn start_via(
     target_port: u16,
     proxy: impl FnOnce(u16) -> (u16, Option<Proxy>),
 ) -> Tunnel {
-    // Auto also listens on the port after the tunnel's (WebSocket).
-    let tunnel_port = free_ports(2);
+    // Auto also listens on the port after the tunnel's (WebSocket), and a multi tunnel's
+    // members take the ports after it.
+    let tunnel_port = free_ports(4);
     let (dial_port, proxy) = proxy(tunnel_port);
     let user_port = free_port();
     let mode = setup.mode;
@@ -1005,6 +1028,10 @@ tunnel_tests! {
     shadowtls_reverse_no_mux: Setup::shadowtls("reverse").no_mux();
     auto_reverse: Setup::tcp("reverse").transport("auto").mux();
     auto_direct: Setup::tcp("direct").transport("auto").mux();
+    multi_reverse: Setup::tcp("reverse").multi(r#""tcp", "ws", "xhttp""#);
+    multi_direct: Setup::tcp("direct").multi(r#""tcp", "ws", "xhttp""#);
+    multi_wss_kcp_grpc_reverse: Setup::tcp("reverse").multi(r#""wss", "kcp", "grpc""#);
+    multi_quic_shadowtls_direct: Setup::tcp("direct").multi(r#""quic", "shadowtls", "dns""#);
 }
 
 /// A `wss` dialer that pins another certificate refuses the listener, so nothing passes.
@@ -2585,6 +2612,80 @@ async fn an_auto_tunnel_says_which_transport_it_uses() {
             );
         }
     }
+}
+
+/// A `multi` tunnel keeps sessions over every one of its transports at once, on both
+/// sides, so the load is shared over all of them.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_multi_tunnel_keeps_sessions_over_every_transport() {
+    for mode in ["reverse", "direct"] {
+        let setup = Setup::tcp(mode)
+            .multi(r#""tcp", "ws", "xhttp", "quic""#)
+            .control();
+        let target = echo_server().await;
+        let tunnel = start(setup, TOKEN, TOKEN, target).await;
+        let want = "quic+tcpmux+ws+xhttp";
+        for socket in [
+            tunnel.control.clone().unwrap(),
+            tunnel.exit_control.clone().unwrap(),
+        ] {
+            let mut status = status_of(&socket).await;
+            for _ in 0..100 {
+                if status.peer.transport.as_deref() == Some(want) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                status = status_of(&socket).await;
+            }
+            assert_eq!(
+                status.peer.transport.as_deref(),
+                Some(want),
+                "{mode}: {status:?}"
+            );
+        }
+        // And the data still goes through.
+        let mut user = TcpStream::connect(("127.0.0.1", tunnel.user_port))
+            .await
+            .unwrap();
+        user.write_all(b"multi").await.unwrap();
+        let mut back = [0u8; 5];
+        user.read_exact(&mut back).await.unwrap();
+        assert_eq!(&back, b"multi");
+    }
+}
+
+/// When one of a `multi` tunnel's transports cannot get through, the others carry the
+/// traffic: here the entry dials `ws` on the second port, where the exit runs `xhttp`, so
+/// that member never connects and every session runs over `tcp`.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_multi_tunnel_carries_on_when_one_transport_is_blocked() {
+    let entry = Setup::tcp("direct").multi(r#""tcp", "ws""#).control();
+    let exit = Setup::tcp("direct").multi(r#""tcp", "xhttp""#).control();
+    let target = echo_server().await;
+    let tunnel = start_pair(entry, exit, TOKEN, TOKEN, target).await;
+    let socket = tunnel.control.clone().unwrap();
+    let mut status = status_of(&socket).await;
+    for _ in 0..100 {
+        if status.peer.connected {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        status = status_of(&socket).await;
+    }
+    assert_eq!(
+        status.peer.transport.as_deref(),
+        Some("tcpmux"),
+        "{status:?}"
+    );
+    let mut user = TcpStream::connect(("127.0.0.1", tunnel.user_port))
+        .await
+        .unwrap();
+    user.write_all(b"still").await.unwrap();
+    let mut back = [0u8; 5];
+    user.read_exact(&mut back).await.unwrap();
+    assert_eq!(&back, b"still");
 }
 
 /// An exit with `speedtest = false` refuses the test streams, and the client says why.

@@ -122,7 +122,9 @@ impl Listener {
             _ => None,
         };
         match settings.kind {
-            TransportKind::Quic | TransportKind::Auto => return Err(not_a_stream_transport()),
+            TransportKind::Quic | TransportKind::Auto | TransportKind::Multi => {
+                return Err(not_a_stream_transport())
+            }
             TransportKind::Kcp
             | TransportKind::Paqet
             | TransportKind::Spoof
@@ -176,7 +178,8 @@ impl Listener {
             | TransportKind::Grpc
             | TransportKind::Xhttp
             | TransportKind::Shadowtls
-            | TransportKind::Auto => unreachable!("handled above"),
+            | TransportKind::Auto
+            | TransportKind::Multi => unreachable!("handled above"),
             TransportKind::Tcp | TransportKind::Tcpmux => Ok(Self::Tcp(tcp)),
             TransportKind::Ws | TransportKind::Wss => Ok(Self::Ws(
                 tcp,
@@ -403,7 +406,9 @@ impl Dialer {
         let ws = settings.ws.as_ref();
         let (config, tls) = match settings.kind {
             TransportKind::Tcp | TransportKind::Tcpmux => return Ok(Self::Tcp(tcp)),
-            TransportKind::Quic | TransportKind::Auto => return Err(not_a_stream_transport()),
+            TransportKind::Quic | TransportKind::Auto | TransportKind::Multi => {
+                return Err(not_a_stream_transport())
+            }
             TransportKind::Kcp
             | TransportKind::Paqet
             | TransportKind::Spoof
