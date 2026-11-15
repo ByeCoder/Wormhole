@@ -172,9 +172,7 @@ impl PairRequest {
                 .then(|| self.proxy_version().map(str::to_owned))
                 .flatten(),
             tls_sni: (!accepts).then(|| self.dial_sni()).flatten(),
-            shadowtls_handshake: (self.transport != "multi" || self.runs("shadowtls"))
-                .then(|| self.shadowtls_handshake.clone())
-                .flatten(),
+            shadowtls_handshake: self.needs_shadowtls().then(|| self.handshake_site()),
             multi: (self.transport == "multi")
                 .then(|| self.multi.clone())
                 .flatten(),
@@ -257,6 +255,17 @@ impl PairRequest {
     /// Whether this is a `shadowtls` tunnel (camouflage TLS to a real site).
     fn needs_shadowtls(&self) -> bool {
         self.runs("shadowtls")
+    }
+
+    /// The real site a `shadowtls` tunnel borrows its TLS from: the one asked for, or
+    /// [`SHADOWTLS_HANDSHAKE`] when the field was left empty (the core needs one).
+    fn handshake_site(&self) -> String {
+        self.shadowtls_handshake
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(SHADOWTLS_HANDSHAKE)
+            .to_owned()
     }
 
     /// A Paqet tunnel listens on every IPv4 address (`0.0.0.0`), as the other transports
@@ -693,6 +702,9 @@ pub const GRPC_SINCE: &str = "1.2.0";
 
 /// The first release with the `xhttp` transport (the tunnel over streaming HTTP/1.1).
 pub const XHTTP_SINCE: &str = "1.2.0";
+
+/// The handshake site of a `shadowtls` tunnel whose form left it empty.
+pub const SHADOWTLS_HANDSHAKE: &str = "www.microsoft.com:443";
 
 /// The first release with the `shadowtls` transport (camouflage TLS to a real site).
 pub const SHADOWTLS_SINCE: &str = "1.2.0";
@@ -2055,6 +2067,47 @@ mod tests {
         let (entry, _) = req(&["xhttp", "tcp"]).specs(None, None);
         assert_eq!(entry.ws_path, None);
         assert_eq!(entry.tls_pin, None);
+    }
+
+    #[test]
+    fn a_shadowtls_tunnel_left_without_a_site_borrows_the_default_one() {
+        let req = |transport: &str, site: Option<&str>| PairRequest {
+            name: "s".into(),
+            entry: "a".into(),
+            exit: "b".into(),
+            mode: "reverse".into(),
+            transport: transport.into(),
+            listen: "0.0.0.0:443".into(),
+            dial: "203.0.113.5:443".into(),
+            shadowtls_handshake: site.map(str::to_owned),
+            multi: (transport == "multi").then(|| vec!["tcp".into(), "shadowtls".into()]),
+            ..Default::default()
+        };
+        // Both sides get [tunnel.shadowtls], which the core refuses to run without.
+        for site in [None, Some(""), Some("  ")] {
+            let (entry, exit) = req("shadowtls", site).specs(None, None);
+            assert_eq!(
+                entry.shadowtls_handshake.as_deref(),
+                Some(SHADOWTLS_HANDSHAKE)
+            );
+            assert_eq!(
+                exit.shadowtls_handshake.as_deref(),
+                Some(SHADOWTLS_HANDSHAKE)
+            );
+        }
+        let (entry, _) = req("shadowtls", Some(" www.example.com:443 ")).specs(None, None);
+        assert_eq!(
+            entry.shadowtls_handshake.as_deref(),
+            Some("www.example.com:443")
+        );
+        let (entry, _) = req("multi", None).specs(None, None);
+        assert_eq!(
+            entry.shadowtls_handshake.as_deref(),
+            Some(SHADOWTLS_HANDSHAKE)
+        );
+        // Any other transport writes none.
+        let (entry, _) = req("xhttp", Some("www.example.com:443")).specs(None, None);
+        assert_eq!(entry.shadowtls_handshake, None);
     }
 
     #[test]
