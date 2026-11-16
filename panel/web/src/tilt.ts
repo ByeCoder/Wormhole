@@ -1,9 +1,11 @@
 // The 3D feel of the panel: a card leans toward the pointer and a light follows it.
-// One listener for the whole page (cards come and go with the pages). Off in the panel's
+// One listener for the whole page (cards come and go with the pages). Never on a card with
+// fields in it. Off in the panel's
 // light mode, for reduced motion and on touch screens.
 
 const MAX = 5; // degrees at the card's edge
 const TALL = 560; // big cards (tables, logs) only get the light, not the lean
+const FIELDS = "input, select, textarea, [role=group], [role=radiogroup], .addr-chips";
 
 function off(): boolean {
   return (
@@ -40,7 +42,9 @@ export function startTilt(): () => void {
     const y = (e.clientY - r.top) / r.height;
     target.style.setProperty("--mx", `${(x * 100).toFixed(1)}%`);
     target.style.setProperty("--my", `${(y * 100).toFixed(1)}%`);
-    if (r.height > TALL || r.width > 1100) return;
+    // Big cards, and cards with something to fill in or pick (a form, port chips), only
+    // get the light: a card that leans while you aim at a field moves the field away.
+    if (r.height > TALL || r.width > 1100 || target.querySelector(FIELDS)) return reset(target);
     const k = target.classList.contains("login-form") ? 1.6 : 1;
     target.classList.add("is-tilting");
     target.style.setProperty("--ry", `${((x - 0.5) * 2 * MAX * k).toFixed(2)}deg`);

@@ -95,6 +95,17 @@ export interface TunnelMeta {
   position?: number;
 }
 
+/** One transport of an auto or multi tunnel, as its side counted it since the tunnel started. */
+export interface TransportShare {
+  transport: string;
+  sessions: number;
+  streams_open: number;
+  streams_total: number;
+  bytes_sent: number;
+  bytes_received: number;
+  rtt_ms: number | null;
+}
+
 export interface TunnelStatus {
   /** Seconds the daemon has run. */
   uptime_secs?: number;
@@ -111,6 +122,8 @@ export interface TunnelStatus {
     streams_max?: number | null;
     /** New connections that failed because every connection was full. */
     full?: number;
+    /** An auto or multi tunnel (1.2.2): each transport's sessions and what went over it. */
+    by_transport?: TransportShare[];
   };
   totals: { bytes_up: number; bytes_down: number; tcp_open: number; udp_flows: number };
   forwards?: { listen: string; open_failures: number; refused_per_ip?: number }[];

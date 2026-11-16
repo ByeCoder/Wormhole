@@ -608,6 +608,7 @@ mod tests {
                 streams: None,
                 streams_max: None,
                 full: 0,
+                by_transport: Vec::new(),
             },
             totals: Totals {
                 bytes_up: 0,

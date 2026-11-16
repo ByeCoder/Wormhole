@@ -406,7 +406,7 @@ mod tests {
             std::future::ready(
                 client
                     .open(syn)
-                    .map(|s| Channel::Stream(SessionStream::Kmux(s))),
+                    .map(|s| Channel::Stream(SessionStream::from(s))),
             )
         }
     }

@@ -3,6 +3,11 @@ import type { MuxSpec } from "./api";
 /** The transports a person chooses from. `tcp` with mux on is the core's `tcpmux`; with mux off, plain `tcp`. */
 export const TRANSPORTS = ["auto", "multi", "tcp", "ws", "wss", "quic", "kcp", "paqet", "spoof", "icmp", "dns", "grpc", "xhttp", "shadowtls"] as const;
 
+/** What a new tunnel starts with for the shadowtls handshake site and the wss SNI: real,
+ *  common HTTPS names (the panel uses the same handshake site when the field is empty). */
+export const DEFAULT_HANDSHAKE = "www.microsoft.com:443";
+export const DEFAULT_SNI = "www.microsoft.com";
+
 /** The transports a `multi` tunnel can run together (`tcp` is the core's `tcpmux`: every member is multiplexed). The raw-socket ones (paqet, spoof, icmp) stay single. */
 export const MULTI_MEMBERS = ["tcp", "ws", "wss", "quic", "kcp", "dns", "grpc", "xhttp", "shadowtls"] as const;
 

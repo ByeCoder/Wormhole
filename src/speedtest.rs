@@ -595,7 +595,7 @@ pub(crate) mod tests {
             while let Some((stream, syn)) = server.accept().await {
                 let open = Open::decode(&syn).unwrap();
                 tokio::spawn(async move {
-                    let pipe = Pipe::Stream(SessionStream::Kmux(stream));
+                    let pipe = Pipe::Stream(SessionStream::from(stream));
                     let _ = serve(pipe, &open.target).await;
                 });
             }
@@ -612,7 +612,7 @@ pub(crate) mod tests {
             std::future::ready(
                 client
                     .open(Bytes::from(syn))
-                    .map(|s| Pipe::Stream(SessionStream::Kmux(s))),
+                    .map(|s| Pipe::Stream(SessionStream::from(s))),
             )
         }
     }

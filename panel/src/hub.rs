@@ -31,8 +31,15 @@ use crate::join::{self, JoinCode, JOIN_TTL};
 use crate::manage::{Services, Systemd};
 use crate::wire::{Ack, Health, HelloReply, LinkKind, NetSpec, Request, TunnelInfo, MAX_REPLY};
 
-/// How often the panel asks an agent for its state.
+/// How often the panel asks an agent for its state while someone has the panel open.
 pub const POLL: Duration = Duration::from_secs(2);
+/// How often, when no one has looked for a while ([`WATCHED_FOR`]): alerts, usage and the
+/// charts still follow, at a fifth of the cost to every server.
+pub const POLL_IDLE: Duration = Duration::from_secs(10);
+/// A signed-in page counts as looking for this long after its last request.
+const WATCHED_FOR: u64 = 60;
+/// `last_seen` of a server is written to the database at most this often (seconds).
+const SEEN_EVERY: u64 = 30;
 /// A request that takes longer than this ends the link.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 /// How many times in a row the list of tunnels may fail before the link is given up.
@@ -297,6 +304,11 @@ pub struct Hub {
     pub telegram: crate::telegram::State,
     /// Agents ports of a server's own (`crate::agent_ports`).
     pub(crate) ports: crate::agent_ports::Ports,
+    /// When a signed-in page last asked the panel anything (Unix seconds); the polls run
+    /// fast while that is recent ([`Hub::pace`]).
+    watched: std::sync::atomic::AtomicU64,
+    /// Wakes the slow polls when someone opens the panel again.
+    wake: tokio::sync::Notify,
 }
 
 pub const LOCAL: &str = "local";
@@ -401,6 +413,8 @@ impl Hub {
             checked: Mutex::new(crate::updater::Checked::default()),
             telegram: crate::telegram::State::default(),
             ports: crate::agent_ports::Ports::default(),
+            watched: std::sync::atomic::AtomicU64::new(0),
+            wake: tokio::sync::Notify::new(),
             wormhole_dir,
             live: Mutex::new(HashMap::new()),
             reverse_gen: Mutex::new(HashMap::new()),
@@ -1833,10 +1847,49 @@ impl Hub {
         Ok((id, hello))
     }
 
-    /// Asks the agent for its state every [`POLL`] until the link ends.
+    /// Someone signed in asked the panel something: the polls go at full pace, and the
+    /// ones resting at the slow pace start at once.
+    pub fn watched(&self) {
+        let now = now().max(0) as u64;
+        let before = self.watched.swap(now, std::sync::atomic::Ordering::Relaxed);
+        if now.saturating_sub(before) > WATCHED_FOR {
+            self.wake.notify_waiters();
+        }
+    }
+
+    /// Starts an operation (`crate::pair::Ops::begin`). The servers are polled at full pace
+    /// while it runs and for a minute after, as when someone looks: its steps and its end
+    /// show in the state they report.
+    pub(crate) fn begin_op(&self, kind: &'static str, name: &str) -> Result<String> {
+        self.watched();
+        self.ops.begin(kind, name)
+    }
+
+    /// How long a poll rests: [`POLL`] while the panel is being looked at or an operation
+    /// runs, else
+    /// [`POLL_IDLE`].
+    fn pace(&self) -> Duration {
+        let seen = self.watched.load(std::sync::atomic::Ordering::Relaxed);
+        if (now().max(0) as u64).saturating_sub(seen) <= WATCHED_FOR || self.ops.busy() {
+            POLL
+        } else {
+            POLL_IDLE
+        }
+    }
+
+    /// Rests for [`Hub::pace`], or until someone opens the panel.
+    async fn rest(&self) {
+        tokio::select! {
+            () = tokio::time::sleep(self.pace()) => {}
+            () = self.wake.notified() => {}
+        }
+    }
+
+    /// Asks the agent for its state every [`Hub::pace`] until the link ends.
     async fn poll(&self, id: &str, session: &Arc<Session>) -> Result<()> {
         let mut tunnels: Vec<TunnelInfo> = Vec::new();
         let mut late = 0u32;
+        let mut seen_written = 0i64;
         loop {
             let health: Health =
                 serde_json::from_slice(&request_on(session, &Request::Health).await?)?;
@@ -1857,12 +1910,18 @@ impl Hub {
                 }
             }
             self.update(id, Some(health), tunnels.clone());
-            let _ = self.db.conn().execute(
-                "UPDATE servers SET last_seen = ?2 WHERE id = ?1",
-                params![id, now()],
-            );
+            // A database write every two seconds for each server was most of the panel's
+            // disk traffic; the minute-scale "last seen" does not need it.
+            let t = now();
+            if t - seen_written >= SEEN_EVERY as i64 {
+                seen_written = t;
+                let _ = self.db.conn().execute(
+                    "UPDATE servers SET last_seen = ?2 WHERE id = ?1",
+                    params![id, t],
+                );
+            }
             tokio::select! {
-                () = tokio::time::sleep(POLL) => {}
+                () = self.rest() => {}
                 () = session.closed() => bail!("the link closed"),
             }
         }
@@ -2033,7 +2092,7 @@ impl Hub {
                     warn!(error = %e, "the private network links could not be synced");
                 }
             }
-            tokio::time::sleep(POLL).await;
+            self.rest().await;
         }
     }
 

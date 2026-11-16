@@ -305,8 +305,13 @@ test.describe("the tunnel", () => {
     const row = page.locator(".tunnels tr", { hasText: "several" });
     await expect(row).toContainText("multi → tcp+ws+xhttp", { timeout: 30_000 });
 
-    // and the edit page shows them picked
+    // its page counts what each transport carried
     await row.click();
+    const shares = page.locator(".shares-table tbody tr");
+    await expect(shares).toHaveCount(3, { timeout: 30_000 });
+    await expect(page.locator(".shares-table")).toContainText("xhttp");
+
+    // and the edit page shows them picked
     await page.getByRole("button", { name: "Edit" }).click();
     await expect(page.getByRole("group", { name: "Transports to run together" }).locator('[aria-pressed="true"]')).toHaveCount(3);
     // nothing changed: Save waits, and Cancel goes back

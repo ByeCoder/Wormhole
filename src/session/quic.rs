@@ -41,6 +41,8 @@ pub struct QuicSession {
     incoming: tokio::sync::Mutex<mpsc::UnboundedReceiver<(QuicStream, Bytes)>>,
     /// The transport name the status shows (a `multi` member's), once set.
     transport: std::sync::OnceLock<&'static str>,
+    /// Where its streams and bytes are counted, once set.
+    usage: std::sync::OnceLock<std::sync::Arc<super::TransportUsage>>,
 }
 
 struct Shared {
@@ -145,6 +147,7 @@ impl QuicSession {
             shared,
             incoming: tokio::sync::Mutex::new(rx),
             transport: std::sync::OnceLock::new(),
+            usage: std::sync::OnceLock::new(),
         }
     }
 
@@ -156,6 +159,15 @@ impl QuicSession {
     }
 
     /// The name set by [`QuicSession::named`], if any.
+    /// Counts streams and bytes into `usage` (see [`super::Session::set_usage`]).
+    pub fn set_usage(&self, usage: std::sync::Arc<super::TransportUsage>) {
+        let _ = self.usage.set(usage);
+    }
+
+    pub fn usage(&self) -> Option<&std::sync::Arc<super::TransportUsage>> {
+        self.usage.get()
+    }
+
     pub fn transport(&self) -> Option<&'static str> {
         self.transport.get().copied()
     }

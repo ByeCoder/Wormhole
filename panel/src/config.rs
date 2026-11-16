@@ -50,13 +50,44 @@ fn default_data_dir() -> PathBuf {
     PathBuf::from(DEFAULT_DATA_DIR)
 }
 
+/// The start of a secret path the panel makes itself (`w-` for Wormhole, then eight hex
+/// digits). Before 1.2.2 it was `k-`.
+pub const PATH_PREFIX: &str = "w-";
+
+/// Whether `path` has the form the panel makes: a prefix and eight hex digits.
+fn generated(path: &str, prefix: &str) -> bool {
+    path.strip_prefix(prefix)
+        .is_some_and(|hex| hex.len() == 8 && hex.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+
+/// The `w-` path a generated `k-` path becomes, if `path` is one.
+pub fn renamed_path(path: &str) -> Option<String> {
+    generated(path, "k-").then(|| format!("{PATH_PREFIX}{}", &path[2..]))
+}
+
+/// The `k-` path a generated `w-` path had before 1.2.2: the panel sends it on to the new one.
+pub fn old_path(path: &str) -> Option<String> {
+    generated(path, PATH_PREFIX).then(|| format!("k-{}", &path[2..]))
+}
+
 impl Config {
     pub fn load(path: &Path) -> Result<Self> {
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("failed to read {}", path.display()))?;
-        let config: Config =
+        let mut config: Config =
             toml::from_str(&text).with_context(|| format!("invalid {}", path.display()))?;
         config.validate()?;
+        // A secret path made before 1.2.2 (`k-` and eight hex digits) becomes `w-` with the
+        // same digits, in the file too, so every command shows the new one. The panel still
+        // answers the old address with a redirect (see [`old_path`]), so links keep working.
+        // A path the owner chose stays as it is; so does this one if the file is read-only.
+        if let Some(new) = renamed_path(&config.path) {
+            let old = format!("path = \"{}\"", config.path);
+            let line = format!("path = \"{new}\"");
+            if text.contains(&old) && std::fs::write(path, text.replacen(&old, &line, 1)).is_ok() {
+                config.path = new;
+            }
+        }
         Ok(config)
     }
 
@@ -144,6 +175,33 @@ pub fn random_port() -> Result<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_generated_k_path_becomes_w_and_a_chosen_one_stays() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("panel.toml");
+        std::fs::write(
+            &file,
+            "# mine\nlisten = \"0.0.0.0:28443\"\npath = \"k-7f3a9c2e\"\n",
+        )
+        .unwrap();
+        assert_eq!(Config::load(&file).unwrap().path, "w-7f3a9c2e");
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert!(
+            text.starts_with("# mine\n") && text.contains("path = \"w-7f3a9c2e\""),
+            "{text}"
+        );
+        for chosen in ["k-mypanel", "k-7f3a9c2e1", "secret-door"] {
+            std::fs::write(
+                &file,
+                format!("listen = \"0.0.0.0:28443\"\npath = \"{chosen}\"\n"),
+            )
+            .unwrap();
+            assert_eq!(Config::load(&file).unwrap().path, chosen);
+        }
+        assert_eq!(old_path("w-7f3a9c2e").as_deref(), Some("k-7f3a9c2e"));
+        assert_eq!(old_path("w-mine"), None);
+    }
 
     #[test]
     fn a_config_is_checked() {

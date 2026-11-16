@@ -96,9 +96,49 @@ pub fn router(path: &str, state: AppState) -> Router {
             get(|| async { asset(Uri::from_static("/")).await }),
         )
         .nest(&format!("/{path}"), inner)
+        .merge(old_address(path))
         .fallback(|| async { not_found() })
         // The front page is served by the outer router, so the headers go on all of it.
         .layer(axum::middleware::from_fn(security_headers))
+}
+
+/// The secret path a panel had before 1.2.2 (`k-…` for a generated `w-…`): its addresses
+/// are sent on to the same place under the new path, so bookmarks and saved links still
+/// open the panel. Only the page's addresses move; the API under the old path is not
+/// served (the page itself always uses the path it was loaded from).
+fn old_address(path: &str) -> Router {
+    let Some(old) = crate::config::old_path(path) else {
+        return Router::new();
+    };
+    let to = format!("/{path}/");
+    let base = to.clone();
+    Router::new()
+        .route(
+            &format!("/{old}"),
+            get({
+                let to = to.clone();
+                move || async move { axum::response::Redirect::permanent(&to) }
+            }),
+        )
+        .route(
+            &format!("/{old}/"),
+            get(move || async move { axum::response::Redirect::permanent(&to) }),
+        )
+        .route(
+            &format!("/{old}/{{*rest}}"),
+            get(
+                move |axum::extract::Path(rest): axum::extract::Path<String>| {
+                    let base = base.clone();
+                    async move {
+                        if rest.starts_with("api/") {
+                            return not_found();
+                        }
+                        axum::response::Redirect::permanent(&format!("{base}{rest}"))
+                            .into_response()
+                    }
+                },
+            ),
+        )
 }
 
 /// Headers every answer of the panel carries (an answer that sets one itself keeps its own).
@@ -345,7 +385,7 @@ mod tests {
     use tower::ServiceExt;
 
     async fn get_path(path: &str) -> (StatusCode, String, Option<String>) {
-        let app = router("k-7f3a9c", AppState::new(Db::in_memory().unwrap()));
+        let app = router("w-7f3a9c", AppState::new(Db::in_memory().unwrap()));
         let response = app
             .oneshot(Request::get(path).body(Body::empty()).unwrap())
             .await
@@ -362,7 +402,7 @@ mod tests {
     }
 
     async fn headers_of(path: &str) -> (StatusCode, axum::http::HeaderMap) {
-        let app = router("k-7f3a9c", AppState::new(Db::in_memory().unwrap()));
+        let app = router("w-7f3a9c", AppState::new(Db::in_memory().unwrap()));
         let response = app
             .oneshot(Request::get(path).body(Body::empty()).unwrap())
             .await
@@ -373,9 +413,9 @@ mod tests {
     #[tokio::test]
     async fn every_answer_under_the_secret_path_is_hardened_and_the_404_stays_nginx() {
         for path in [
-            "/k-7f3a9c/api/version",
-            "/k-7f3a9c/api/session",
-            "/k-7f3a9c/",
+            "/w-7f3a9c/api/version",
+            "/w-7f3a9c/api/session",
+            "/w-7f3a9c/",
         ] {
             let (status, h) = headers_of(path).await;
             assert!(status.is_success(), "{path} {status}");
@@ -401,7 +441,7 @@ mod tests {
             assert!(csp.contains("frame-ancestors 'none'"), "{path}: {csp}");
         }
         // The API is never cached; a page never gets a script from anywhere else.
-        let (_, h) = headers_of("/k-7f3a9c/api/version").await;
+        let (_, h) = headers_of("/w-7f3a9c/api/version").await;
         assert_eq!(h.get("cache-control").unwrap(), "no-store");
         assert!(h
             .get("content-security-policy")
@@ -409,7 +449,7 @@ mod tests {
             .to_str()
             .unwrap()
             .contains("default-src 'none'"));
-        let (_, h) = headers_of("/k-7f3a9c/").await;
+        let (_, h) = headers_of("/w-7f3a9c/").await;
         let csp = h.get("content-security-policy").unwrap().to_str().unwrap();
         for part in [
             "script-src 'self'",
@@ -433,8 +473,8 @@ mod tests {
             "/",
             "/login",
             "/api/version",
-            "/k-other/",
-            "/k-7f3a9cc/",
+            "/w-other/",
+            "/w-7f3a9cc/",
             "/admin",
         ] {
             let (status, body, _) = get_path(path).await;
@@ -442,10 +482,10 @@ mod tests {
             assert!(body.contains("<center>nginx</center>"), "{path}: {body}");
         }
         // No closing slash: on to the slash, where the page's relative addresses work.
-        let (status, headers) = headers_of("/k-7f3a9c").await;
+        let (status, headers) = headers_of("/w-7f3a9c").await;
         assert_eq!(status, StatusCode::PERMANENT_REDIRECT);
-        assert_eq!(headers.get("location").unwrap(), "/k-7f3a9c/");
-        for path in ["/k-7f3a9c/", "/k-7f3a9c/servers"] {
+        assert_eq!(headers.get("location").unwrap(), "/w-7f3a9c/");
+        for path in ["/w-7f3a9c/", "/w-7f3a9c/servers"] {
             let (status, body, cache) = get_path(path).await;
             assert_eq!(status, StatusCode::OK, "{path}");
             assert!(body.contains("Wormhole"), "{path}");
@@ -454,13 +494,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_address_before_1_2_2_leads_to_the_new_one() {
+        let app = || router("w-7f3a9c2e", AppState::new(Db::in_memory().unwrap()));
+        let go = |path: &'static str| async move {
+            let r = app()
+                .oneshot(Request::get(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            let to = r
+                .headers()
+                .get("location")
+                .map(|v| v.to_str().unwrap().to_owned());
+            (r.status(), to)
+        };
+        for (from, to) in [
+            ("/k-7f3a9c2e", "/w-7f3a9c2e/"),
+            ("/k-7f3a9c2e/", "/w-7f3a9c2e/"),
+            ("/k-7f3a9c2e/servers", "/w-7f3a9c2e/servers"),
+        ] {
+            assert_eq!(
+                go(from).await,
+                (StatusCode::PERMANENT_REDIRECT, Some(to.into())),
+                "{from}"
+            );
+        }
+        // Not the API, and no other old path.
+        assert_eq!(go("/k-7f3a9c2e/api/version").await.0, StatusCode::NOT_FOUND);
+        assert_eq!(go("/k-00000000/").await.0, StatusCode::NOT_FOUND);
+        // The new address is the panel.
+        assert_eq!(go("/w-7f3a9c2e/api/version").await.0, StatusCode::OK);
+    }
+
+    #[tokio::test]
     async fn the_api_and_missing_files() {
-        let (status, body, _) = get_path("/k-7f3a9c/api/version").await;
+        let (status, body, _) = get_path("/w-7f3a9c/api/version").await;
         assert_eq!(status, StatusCode::OK);
         let doc: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(doc["name"], "wormhole-panel");
         // An unknown API path and a missing file are 404s, not the app's page.
-        for path in ["/k-7f3a9c/api/nothing", "/k-7f3a9c/assets/missing.js"] {
+        for path in ["/w-7f3a9c/api/nothing", "/w-7f3a9c/assets/missing.js"] {
             assert_eq!(get_path(path).await.0, StatusCode::NOT_FOUND, "{path}");
         }
     }

@@ -176,6 +176,8 @@ fn authenticate(state: &AppState, headers: &HeaderMap, csrf: bool) -> Result<Ses
     let session = auth::find_session(&state.db, &token, auth::now())
         .map_err(internal)?
         .ok_or_else(|| error(StatusCode::UNAUTHORIZED, "signed_out"))?;
+    // Someone is looking: the servers are asked at full pace.
+    state.hub.watched();
     if csrf {
         let sent = headers.get(CSRF_HEADER).and_then(|v| v.to_str().ok());
         if sent != Some(session.csrf.as_str()) {

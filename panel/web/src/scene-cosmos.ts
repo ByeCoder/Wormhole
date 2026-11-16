@@ -1,9 +1,11 @@
 // The space behind the whole panel: a nebula, a slowly turning spiral galaxy seen at an
-// angle, three depths of stars that move with the pointer, and now and then a falling star.
+// angle, three depths of stars drifting slowly, and now and then a falling star. It does
+// not follow the pointer: a background that moves under the hand makes aiming at a field
+// harder.
 //
 // Built to stay light: everything that does not move is painted once into offscreen
 // canvases (again only on a resize or a theme change), so a frame is two image copies and a
-// few hundred star dots. It draws at most 30 times a second, stops while the tab is hidden,
+// few hundred star dots. It draws at most 20 times a second, stops while the tab is hidden,
 // and in low-power mode (or for reduced motion) it is painted once, still.
 import { clamp, rng } from "./draw";
 
@@ -156,18 +158,13 @@ export function startCosmos(canvas: HTMLCanvasElement): Cosmos {
   let meteor: { x: number; y: number; vx: number; vy: number; life: number } | null = null;
   let nextMeteor = performance.now() + 6000;
 
-  const onMove = (e: PointerEvent) => {
-    mx = e.clientX / innerWidth - 0.5;
-    my = e.clientY / innerHeight - 0.5;
-  };
-  addEventListener("pointermove", onMove, { passive: true });
 
   const frame = (now: number) => {
     if (stopped) return;
     raf = requestAnimationFrame(frame);
     const calm = still();
-    // 30 frames a second is plenty for a background; once every two seconds when still.
-    if (now - lastDraw < (calm ? 2000 : 33)) return;
+    // 20 frames a second is plenty for a slow background; once every two seconds when still.
+    if (now - lastDraw < (calm ? 2000 : 50)) return;
     lastDraw = now;
     const dpr = Math.min(devicePixelRatio || 1, 1.5);
     const W = innerWidth;
@@ -196,6 +193,9 @@ export function startCosmos(canvas: HTMLCanvasElement): Cosmos {
       }));
     }
     const t = now / 1000;
+    // A slow drift of the depths, once round in about four minutes.
+    mx = calm ? 0 : 0.35 * Math.sin(t * 0.026);
+    my = calm ? 0 : 0.25 * Math.cos(t * 0.021);
     px += (mx - px) * 0.04;
     py += (my - py) * 0.04;
     ctx.globalCompositeOperation = "source-over";
@@ -214,7 +214,7 @@ export function startCosmos(canvas: HTMLCanvasElement): Cosmos {
     ctx.drawImage(G, -gs / 2, -gs / 2, gs, gs);
     ctx.restore();
 
-    // Stars: the nearer, the bigger, brighter and more they move with the pointer.
+    // Stars: the nearer, the bigger, brighter and more they drift.
     ctx.globalCompositeOperation = dark ? "lighter" : "source-over";
     for (const s of stars) {
       const x = s.x * W - px * 40 * s.z;
@@ -242,9 +242,9 @@ export function startCosmos(canvas: HTMLCanvasElement): Cosmos {
       }
       if (meteor) {
         const m = meteor;
-        m.x += m.vx * 0.033;
-        m.y += m.vy * 0.033;
-        m.life -= 0.033 * 1.1;
+        m.x += m.vx * 0.05;
+        m.y += m.vy * 0.05;
+        m.life -= 0.05 * 1.1;
         const tail = ctx.createLinearGradient(m.x, m.y, m.x - m.vx * 0.18, m.y - m.vy * 0.18);
         tail.addColorStop(0, `rgba(220,250,255,${0.9 * m.life})`);
         tail.addColorStop(1, "rgba(139,92,255,0)");
@@ -269,7 +269,6 @@ export function startCosmos(canvas: HTMLCanvasElement): Cosmos {
     stop() {
       stopped = true;
       cancelAnimationFrame(raf);
-      removeEventListener("pointermove", onMove);
       document.removeEventListener("visibilitychange", onVisible);
     },
   };

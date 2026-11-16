@@ -860,6 +860,11 @@ impl Ops {
         self.0.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// Whether an operation is running now.
+    pub(crate) fn busy(&self) -> bool {
+        self.lock().iter().any(|o| o.state == "running")
+    }
+
     pub(crate) fn begin(&self, kind: &'static str, name: &str) -> Result<String> {
         let id = random_hex(8)?;
         let mut ops = self.lock();
@@ -1103,7 +1108,7 @@ pub fn create_with_kcp(
     validate_kcp(&req.transport, kcp.as_ref())?;
     req.require_new_enough(hub)?;
     req.fit_paqet_listen(hub)?;
-    let id = hub.ops.begin("create", &req.name)?;
+    let id = hub.begin_op("create", &req.name)?;
     let hub = hub.clone();
     let op = id.clone();
     tokio::spawn(async move {
@@ -1343,7 +1348,7 @@ pub fn edit_with_kcp(hub: &Arc<Hub>, mut req: PairRequest, kcp: Option<KcpSpec>)
             }
         }
     }
-    let id = hub.ops.begin("edit", &req.name)?;
+    let id = hub.begin_op("edit", &req.name)?;
     let hub = hub.clone();
     let op = id.clone();
     tokio::spawn(async move {
@@ -1563,7 +1568,7 @@ pub fn control(hub: &Arc<Hub>, name: &str, action: &str) -> Result<String> {
     if !matches!(action, "start" | "stop" | "restart") {
         bail!("bad_action");
     }
-    let id = hub.ops.begin("control", name)?;
+    let id = hub.begin_op("control", name)?;
     let hub = hub.clone();
     let (op, name, action) = (id.clone(), name.to_owned(), action.to_owned());
     tokio::spawn(async move {
@@ -1633,7 +1638,7 @@ pub fn delete(hub: &Arc<Hub>, name: &str) -> Result<String> {
     if !valid_name(name) {
         bail!("bad_name");
     }
-    let id = hub.ops.begin("delete", name)?;
+    let id = hub.begin_op("delete", name)?;
     let hub = hub.clone();
     let (op, name) = (id.clone(), name.to_owned());
     tokio::spawn(async move {

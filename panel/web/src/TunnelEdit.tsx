@@ -19,7 +19,7 @@ import { ProxyProtocol, proxyFromSpec, proxyOf } from "./ProxyProtocol";
 import type { ProxyChoice } from "./ProxyProtocol";
 import { GreChoice, linkWithAddress } from "./GreChoice";
 import { useNetworks } from "./Networks";
-import { MUX_OPTIONAL, TRANSPORTS, joinTransport, multiPorts, runsTransport, splitTransport } from "./transport";
+import { DEFAULT_HANDSHAKE, DEFAULT_SNI, MUX_OPTIONAL, TRANSPORTS, joinTransport, multiPorts, runsTransport, splitTransport } from "./transport";
 import { WsModeChoice, readWsMode, wsModeField } from "./WsMode";
 import type { WsMode } from "./WsMode";
 import { PROFILES, addressesOf, hostOf, parsePorts, portOf } from "./Wizard";
@@ -591,21 +591,21 @@ export function TunnelEdit({ tunnel, servers, preset, onBack }: { tunnel: Tunnel
                     {isWs && (
                       <div className="field">
                         <label htmlFor="te-wshost">{t("wz.wsHost")}</label>
-                        <input className="text mono" id="te-wshost" dir="ltr" value={wsHost} placeholder="cdn.example.com" onChange={(e) => setWsHost(e.target.value.trim())} />
+                        <input className="text mono" id="te-wshost" dir="ltr" value={wsHost} placeholder={dialHost || "cdn.example.com"} onChange={(e) => setWsHost(e.target.value.trim())} />
                         <span className="help">{t("wz.wsHostHelp")}</span>
                       </div>
                     )}
                     {has("wss") && tls.mode === "self" && (
                       <div className="field">
                         <label htmlFor="te-sni">{t("wz.sni")}</label>
-                        <input className="text mono" id="te-sni" dir="ltr" value={sni} placeholder="www.example.com" onChange={(e) => setSni(e.target.value.trim())} />
+                        <input className="text mono" id="te-sni" dir="ltr" value={sni} placeholder={DEFAULT_SNI} onChange={(e) => setSni(e.target.value.trim())} />
                         <span className="help">{t("wz.sniHelp")}</span>
                       </div>
                     )}
                     {has("shadowtls") && (
                       <div className="field">
                         <label htmlFor="te-sths">{t("wz.shadowtls.handshake")}</label>
-                        <input className="text mono" id="te-sths" dir="ltr" value={stHandshake} placeholder="www.microsoft.com:443" onChange={(e) => setStHandshake(e.target.value.trim())} />
+                        <input className="text mono" id="te-sths" dir="ltr" value={stHandshake} placeholder={DEFAULT_HANDSHAKE} onChange={(e) => setStHandshake(e.target.value.trim())} />
                         <span className="help">{t("wz.shadowtls.handshakeHelp")}</span>
                       </div>
                     )}

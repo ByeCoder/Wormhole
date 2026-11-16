@@ -119,6 +119,7 @@ Readers must ignore fields they do not know: later versions add fields and raise
 | `last_error` | `{ "secs_ago": 12, "text": "authentication failed" }` for the last failed connect or handshake, or `null`. A refused or unreachable other side shows at once; a token mismatch takes longer: the listening side keeps a failed connection open for a random 5-30 s before it gives up (so probes learn nothing), and the dialing side reports it when its handshake times out (`tuning.handshake_timeout_secs`, 10 s) |
 | `streams`, `streams_max` | with mux: streams open over all live sessions, and how many those sessions take (`mux.max_streams` each; a session that is being replaced takes none). `null` without mux |
 | `full` | new connections and flows that failed because every session was full (entry side) |
+| `by_transport` | an `auto` or `multi` tunnel (1.2.2): one entry per transport it has run over — `transport`, its live `sessions`, `streams_open` now and `streams_total` since the tunnel started, the payload `bytes_sent` and `bytes_received` by this side, and its `rtt_ms`. Left out for the other transports. The panel shows it on the tunnel's page, *By transport* |
 
 ### `totals` and `forwards`
 

@@ -601,6 +601,8 @@ pub struct MuxSession {
     incoming: tokio::sync::Mutex<mpsc::UnboundedReceiver<(MuxStream, Bytes)>>,
     /// The transport it runs over, when something wants to tell (`auto` does).
     transport: std::sync::OnceLock<&'static str>,
+    /// Where its streams and bytes are counted, once set.
+    usage: std::sync::OnceLock<std::sync::Arc<crate::session::TransportUsage>>,
 }
 
 impl MuxSession {
@@ -705,7 +707,17 @@ impl MuxSession {
             shared,
             incoming: tokio::sync::Mutex::new(rx),
             transport: std::sync::OnceLock::new(),
+            usage: std::sync::OnceLock::new(),
         }
+    }
+
+    /// Counts streams and bytes into `usage` (see [`crate::session::Session::set_usage`]).
+    pub fn set_usage(&self, usage: std::sync::Arc<crate::session::TransportUsage>) {
+        let _ = self.usage.set(usage);
+    }
+
+    pub fn usage(&self) -> Option<&std::sync::Arc<crate::session::TransportUsage>> {
+        self.usage.get()
     }
 
     /// Notes which transport this session runs over (once; later calls change nothing).

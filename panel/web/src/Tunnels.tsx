@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { ApiError, api, isPrivatePath } from "./api";
-import type { ServerInfo } from "./api";
+import type { ServerInfo, TransportShare } from "./api";
 import { pairTunnels, rateParts } from "./derive";
 import type { Tunnel, TunnelState } from "./derive";
 import { useApp } from "./store";
@@ -346,6 +346,58 @@ function bytes(n: number): { value: number; unit: string; decimals: number } {
 type Action = "start" | "stop" | "restart" | "delete" | "rotate";
 
 /** One tunnel, on a page of its own. */
+/** An auto or multi tunnel's transports side by side: sessions, connections and bytes each
+ *  carried, and its share of all the bytes. */
+function TransportShares({ shares }: { shares: TransportShare[] }) {
+  const { t, num } = useApp();
+  const total = shares.reduce((n, s) => n + s.bytes_sent + s.bytes_received, 0);
+  const amount = (n: number) => {
+    const b = bytes(n);
+    return `${num(b.value, b.decimals)} ${b.unit}`;
+  };
+  const rows = [...shares].sort((a, b) => b.bytes_sent + b.bytes_received - (a.bytes_sent + a.bytes_received));
+  return (
+    <table className="plain-table shares-table">
+      <thead>
+        <tr>
+          <th>{t("td.share.transport")}</th>
+          <th>{t("td.share.share")}</th>
+          <th>{t("td.share.sent")}</th>
+          <th>{t("td.share.received")}</th>
+          <th>{t("td.share.conns")}</th>
+          <th>{t("tun.sessions")}</th>
+          <th>{t("tun.rtt")}</th>
+        </tr>
+      </thead>
+      <tbody>
+        {rows.map((s) => {
+          const part = total ? ((s.bytes_sent + s.bytes_received) / total) * 100 : 0;
+          return (
+            <tr key={s.transport} className={s.sessions === 0 ? "is-down" : undefined}>
+              <td>
+                <span className="tag mono">{s.transport === "tcpmux" ? "tcp" : s.transport}</span>
+              </td>
+              <td>
+                <span className="share-bar" aria-hidden="true">
+                  <span style={{ width: `${part.toFixed(1)}%` }} />
+                </span>
+                <span className="mono small">{num(part, part < 10 ? 1 : 0)}%</span>
+              </td>
+              <td className="mono">{amount(s.bytes_sent)}</td>
+              <td className="mono">{amount(s.bytes_received)}</td>
+              <td className="mono" title={t("td.share.connsTip", { open: num(s.streams_open), total: num(s.streams_total) })}>
+                {num(s.streams_open)} / {num(s.streams_total)}
+              </td>
+              <td className="mono">{num(s.sessions)}</td>
+              <td className="mono">{s.rtt_ms != null ? `${num(s.rtt_ms, 0)} ms` : "—"}</td>
+            </tr>
+          );
+        })}
+      </tbody>
+    </table>
+  );
+}
+
 function TunnelPage({
   tunnel,
   servers,
@@ -580,6 +632,12 @@ function TunnelPage({
           </Card>
         )}
   
+        {(status ?? tunnel.exit?.tunnel.status)?.peer.by_transport?.length ? (
+          <Card title={t("td.shares")} sub={t("td.sharesSub")} flush>
+            <TransportShares shares={(status ?? tunnel.exit!.tunnel.status!).peer.by_transport!} />
+          </Card>
+        ) : null}
+
         {tunnel.entry && (
           <Card title={t("td.traffic")} sub={t("td.trafficSub")}>
             <div className="grid-3">

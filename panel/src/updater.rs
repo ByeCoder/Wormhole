@@ -155,7 +155,7 @@ pub fn start(hub: &Arc<Hub>, confirm_major: bool) -> Result<String> {
     if !cfg!(target_os = "linux") {
         bail!("no_systemd");
     }
-    let id = hub.ops.begin("update", "panel")?;
+    let id = hub.begin_op("update", "panel")?;
     let (hub, op) = (hub.clone(), id.clone());
     tokio::spawn(async move {
         let error = run(&hub, &op, &settings, release)
@@ -406,7 +406,7 @@ pub fn start_servers(hub: &Arc<Hub>, restart: bool) -> Result<String> {
     if !cfg!(target_os = "linux") && hub.snapshot()?.iter().any(|s| !s.local) {
         bail!("no_systemd");
     }
-    let id = hub.ops.begin("update_servers", "servers")?;
+    let id = hub.begin_op("update_servers", "servers")?;
     let (hub, op) = (hub.clone(), id.clone());
     tokio::spawn(async move {
         let error = run_servers(&hub, &op, &settings, restart)

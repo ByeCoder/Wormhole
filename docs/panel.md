@@ -18,10 +18,10 @@ wormhole-manager panel install
 then writes the settings, makes the database, starts the service `wormhole-panel`, and prints:
 
 ```text
-  address       https://203.0.113.5:28443/k-7f3a9c2e/
+  address       https://203.0.113.5:28443/w-7f3a9c2e/
   certificate   /etc/letsencrypt/live/wormhole-panel-203-0-113-5/fullchain.pem
   agents        port 22230: TCP and UDP, and TCP and UDP 22231 (open them for the servers you add)
-  sign in       https://203.0.113.5:28443/k-7f3a9c2e/#t=...
+  sign in       https://203.0.113.5:28443/w-7f3a9c2e/#t=...
 ```
 
 - **The address** has a secret path: the panel answers only there. Any other address gets

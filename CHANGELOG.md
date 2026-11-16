@@ -1,5 +1,32 @@
 # Changelog
 
+## 1.2.2 - 2026-11-16
+
+- **A tunnel's transports side by side.** The page of an `auto` or `multi` tunnel has a
+  *By transport* table: for each transport its share of the traffic, bytes sent and
+  received, connections open now and since the tunnel started, live sessions and round
+  trip. The status document has it as `peer.by_transport`
+  ([status](docs/status.md)).
+- **Lighter on the servers.** The agent no longer runs `systemctl` for every tunnel on every
+  poll (a daemon that answers on its control socket is running), the panel asks its
+  servers every 10 s instead of 2 s while no one has it open (at once back to 2 s when
+  someone does), and it writes a server's *last seen* to its database every 30 s, not
+  every 2 s.
+- **Lighter in the browser.** A new sign-in screen: planets in 3D tied together by
+  tunnels with light running along them, drawn at 24 frames a second at most, in place of
+  the wormhole of rings; the floor grid and most of the form's blur are gone. The space
+  behind every page no longer follows the pointer and draws at 20 frames a second.
+- **Cards hold still under the hand.** A card with fields or chips in it (the tunnel
+  editor's ports, the wizard) no longer leans toward the pointer.
+- **Defaults filled in.** A new tunnel's shadowtls handshake site and wss SNI start as
+  `www.microsoft.com:443` and `www.microsoft.com`, so what the form shows is what the
+  tunnel gets; the WebSocket Host field shows the address it falls back to.
+- **The panel's address starts with `w-`.** A panel's secret path made by the panel itself
+  (`k-` and eight hex digits) becomes `w-` with the same digits on its next start; the old
+  address still opens it (it is sent on to the new one).
+- **Update hint.** A `wormhole-manager` from before 1.2.0 cannot check releases signed
+  with the new key; the error now says to get the current manager with the install line.
+
 ## 1.2.1 - 2026-11-16
 
 - **Fix:** a `shadowtls` tunnel built in the panel with the handshake site left empty failed
