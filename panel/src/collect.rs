@@ -402,7 +402,14 @@ async fn tunnel(name: &str, path: &Path, services: &dyn Services) -> TunnelInfo 
             }
         }
     };
-    let (status, active) = tokio::join!(tunnel_status(&config), services.active(name.to_owned()));
+    // A daemon that answers on its control socket runs: only one that does not is asked
+    // about from systemd (a `systemctl` process for every tunnel every poll was most of an
+    // idle server's CPU).
+    let status = tunnel_status(&config).await;
+    let active = match status {
+        Some(_) => Some(true),
+        None => services.active(name.to_owned()).await,
+    };
     TunnelInfo {
         name: name.to_owned(),
         role: role_name(config.role).to_owned(),

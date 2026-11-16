@@ -21,7 +21,7 @@ import type { ProxyChoice } from "./ProxyProtocol";
 import { Choice, More, noteOf, pairOf } from "./Choice";
 import { BenchPanel, benchLabel, isV6 } from "./Benchmark";
 import type { BenchChoice } from "./Benchmark";
-import { MUX_OPTIONAL, TRANSPORTS, joinTransport, multiPorts, runsTransport, transportLabel } from "./transport";
+import { DEFAULT_HANDSHAKE, DEFAULT_SNI, MUX_OPTIONAL, TRANSPORTS, joinTransport, multiPorts, runsTransport, transportLabel } from "./transport";
 import { WsModeChoice, wsModeField } from "./WsMode";
 import type { WsMode } from "./WsMode";
 import { FIRST_TUNNEL_PORT, firstTunnelPort, freeTunnelPort, hostOf, portOf, portsInUse } from "./ports";
@@ -117,8 +117,9 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
   const [wsPath, setWsPath] = useState("/");
   const [wsMode, setWsMode] = useState<WsMode>("websocket");
   const [wsHost, setWsHost] = useState("");
-  const [sni, setSni] = useState("");
-  const [stHandshake, setStHandshake] = useState("");
+  // Filled in from the start, so what the form shows is what the tunnel gets.
+  const [sni, setSni] = useState(DEFAULT_SNI);
+  const [stHandshake, setStHandshake] = useState(DEFAULT_HANDSHAKE);
   const [mux, setMux] = useState(emptyMux());
   const [kcp, setKcp] = useState(emptyKcp());
   const [tls, setTls] = useState(emptyTls());
@@ -587,21 +588,21 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
                       {isWs && (
                         <div className="field">
                           <label htmlFor="wz-wshost">{t("wz.wsHost")}</label>
-                          <input className="text mono" id="wz-wshost" dir="ltr" value={wsHost} placeholder="cdn.example.com" onChange={(e) => setWsHost(e.target.value.trim())} />
+                          <input className="text mono" id="wz-wshost" dir="ltr" value={wsHost} placeholder={dialHost || "cdn.example.com"} onChange={(e) => setWsHost(e.target.value.trim())} />
                           <span className="help">{t("wz.wsHostHelp")}</span>
                         </div>
                       )}
                       {has("wss") && tls.mode === "self" && (
                         <div className="field">
                           <label htmlFor="wz-sni">{t("wz.sni")}</label>
-                          <input className="text mono" id="wz-sni" dir="ltr" value={sni} placeholder="www.example.com" onChange={(e) => setSni(e.target.value.trim())} />
+                          <input className="text mono" id="wz-sni" dir="ltr" value={sni} placeholder={DEFAULT_SNI} onChange={(e) => setSni(e.target.value.trim())} />
                           <span className="help">{t("wz.sniHelp")}</span>
                         </div>
                       )}
                       {has("shadowtls") && (
                         <div className="field">
                           <label htmlFor="wz-sths">{t("wz.shadowtls.handshake")}</label>
-                          <input className="text mono" id="wz-sths" dir="ltr" value={stHandshake} placeholder="www.microsoft.com:443" onChange={(e) => setStHandshake(e.target.value.trim())} />
+                          <input className="text mono" id="wz-sths" dir="ltr" value={stHandshake} placeholder={DEFAULT_HANDSHAKE} onChange={(e) => setStHandshake(e.target.value.trim())} />
                           <span className="help">{t("wz.shadowtls.handshakeHelp")}</span>
                         </div>
                       )}

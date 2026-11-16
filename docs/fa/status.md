@@ -110,6 +110,7 @@ daemon -> client   ---\n<JSON document>\n
 | `last_error` | `{ "secs_ago": 12, "text": "authentication failed" }` برای آخرین اتصال یا handshakeِ ناموفق، یا `null`. سمت دیگرِ ردکننده یا دست‌نیافتنی فوراً دیده می‌شود؛ ناهمخوانی توکن دیرتر: سمت شنونده یک اتصال ناموفق را ۵ تا ۳۰ ثانیهٔ تصادفی باز نگه می‌دارد تا رها کند (تا probeها چیزی یاد نگیرند) و سمت وصل‌شونده وقتی گزارشش می‌کند که handshake‌اش timeout بخورد (`tuning.handshake_timeout_secs`، ۱۰ ثانیه) |
 | `streams`، `streams_max` | با mux: streamهای باز روی همهٔ sessionهای زنده، و این sessionها روی هم چندتا را می‌برند (هرکدام `mux.max_streams`؛ sessionی که در حال جایگزینی است چیزی نمی‌برد). بدون mux برابر `null` |
 | `full` | اتصال‌ها و جریان‌های تازه‌ای که رد شدند چون همهٔ sessionها پر بودند (سمت ورودی) |
+| `by_transport` | تونل `auto` یا `multi` (1.2.2): برای هر ترنسپورتی که رویش کار کرده یک مورد — `transport`، `sessions` زنده، `streams_open` همین حالا و `streams_total` از شروع تونل، بایت‌های `bytes_sent` و `bytes_received` این سمت، و `rtt_ms`. برای بقیهٔ ترنسپورت‌ها نمی‌آید. پنل آن را در صفحهٔ تونل، بخش «به تفکیک ترنسپورت» نشان می‌دهد |
 
 ### `totals` و `forwards`
 

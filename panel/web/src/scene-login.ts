@@ -1,7 +1,14 @@
-// The login scene: a wormhole seen from inside. Neon rings fall toward the viewer along a
-// gently curving throat, and streaks of light rush past. A wrong password sends a shock
-// through the rings; a right one goes to warp and dives into the dashboard.
-import { clamp, easeInOut, fitCanvas, lerp, rng } from "./draw";
+// The login scene: planets in space, tied together by tunnels. A small system of worlds
+// turns slowly in 3D around a ringed hub; light runs along the links between them like
+// traffic. A wrong password sends a shudder and a red flash through the links; a right one
+// flies the camera into the hub and on to the dashboard.
+//
+// Built to stay light: every planet is painted once into a small sprite (again only on a
+// theme change), so a frame is a dozen image copies, a few lines and dots. It draws at most
+// 24 times a second at no more than 1.5× pixel density, does not follow the pointer, and in
+// low-power mode (or for reduced motion) it is drawn twice a second without motion.
+// Space itself (stars, the galaxy) is the panel's background (scene-cosmos) showing through.
+import { clamp, easeInOut, rng } from "./draw";
 import type { Palette } from "./draw";
 
 export interface LoginSceneOptions {
@@ -17,48 +24,150 @@ export interface LoginScene {
   stop: () => void;
 }
 
-interface Streak {
-  a: number;
-  r: number;
-  z: number;
-  s: number;
-  hue: number;
-}
+type RGB = [number, number, number];
 
-interface Dust {
+interface Planet {
+  /** Position on the unit scale, before the turn. */
   x: number;
   y: number;
   z: number;
-  ph: number;
+  /** Radius in the same units. */
+  r: number;
+  color: number;
+  ring: boolean;
 }
 
-const RINGS = 30;
-const NEAR = 0.06;
-
-/** cyan → violet → magenta, by k in [0,1]. */
-function neon(k: number, night: boolean): [number, number, number] {
-  const stops: [number, number, number][] = night
-    ? [
-        [34, 243, 255],
-        [139, 92, 255],
-        [255, 63, 216],
-        [34, 243, 255],
-      ]
-    : [
-        [0, 170, 220],
-        [90, 34, 230],
-        [200, 20, 160],
-        [0, 170, 220],
-      ];
-  const x = ((k % 1) + 1) % 1 * 3;
-  const i = Math.floor(x);
-  const f = x - i;
-  const a = stops[i];
-  const b = stops[i + 1];
-  return [lerp(a[0], b[0], f), lerp(a[1], b[1], f), lerp(a[2], b[2], f)];
+interface Link {
+  a: number;
+  b: number;
+  /** Where along the link the packet is (0…1), and how fast it goes. */
+  at: number;
+  speed: number;
 }
 
-const rgb = (c: [number, number, number], a: number) => `rgba(${c[0] | 0},${c[1] | 0},${c[2] | 0},${a})`;
+/** Light, base and shadow of each planet's colour. */
+const COLORS: [RGB, RGB, RGB][] = [
+  [[189, 252, 255], [34, 200, 235], [6, 40, 70]], // cyan ice
+  [[226, 210, 255], [139, 92, 255], [30, 14, 70]], // violet
+  [[255, 205, 240], [236, 72, 190], [60, 10, 50]], // magenta
+  [[255, 236, 200], [240, 170, 80], [70, 34, 10]], // amber
+  [[200, 255, 225], [40, 200, 150], [8, 50, 40]], // teal
+  [[230, 236, 255], [120, 140, 220], [20, 24, 60]], // slate blue
+];
+
+const FPS = 24;
+const CAMERA = 3.6; // distance of the eye from the centre, in planet-space units
+
+const rgb = (c: RGB, a = 1) => `rgba(${c[0] | 0},${c[1] | 0},${c[2] | 0},${a})`;
+
+/** A lit sphere with a thin atmosphere, painted once: `size` px across, the planet in the
+ *  middle 70% so the glow has room. */
+function paintPlanet(size: number, [light, base, shade]: [RGB, RGB, RGB], ring: boolean, night: boolean, seed: number): HTMLCanvasElement {
+  const c = document.createElement("canvas");
+  c.width = c.height = size;
+  const g = c.getContext("2d")!;
+  const R = size * 0.35;
+  const m = size / 2;
+  // atmosphere
+  const glow = g.createRadialGradient(m, m, R * 0.9, m, m, R * 1.42);
+  glow.addColorStop(0, rgb(base, night ? 0.45 : 0.25));
+  glow.addColorStop(1, rgb(base, 0));
+  g.fillStyle = glow;
+  g.fillRect(0, 0, size, size);
+  if (ring) drawRing(g, m, R, base, light, "back");
+  // body, lit from the upper left
+  const body = g.createRadialGradient(m - R * 0.4, m - R * 0.45, R * 0.08, m, m, R);
+  body.addColorStop(0, rgb(light));
+  body.addColorStop(0.45, rgb(base));
+  body.addColorStop(1, rgb(shade));
+  g.fillStyle = body;
+  g.beginPath();
+  g.arc(m, m, R, 0, Math.PI * 2);
+  g.fill();
+  // a few soft bands, so the planets are not all billiard balls
+  const r = rng(seed);
+  g.save();
+  g.beginPath();
+  g.arc(m, m, R, 0, Math.PI * 2);
+  g.clip();
+  g.globalAlpha = 0.18;
+  for (let i = 0; i < 4; i++) {
+    g.fillStyle = r() < 0.5 ? rgb(light) : rgb(shade);
+    const y = m - R + r() * R * 2;
+    g.fillRect(m - R, y, R * 2, R * (0.06 + r() * 0.14));
+  }
+  g.restore();
+  // night side
+  const dark = g.createLinearGradient(m - R, m - R, m + R, m + R);
+  dark.addColorStop(0.45, "rgba(0,0,0,0)");
+  dark.addColorStop(1, `rgba(0,0,8,${night ? 0.55 : 0.3})`);
+  g.fillStyle = dark;
+  g.beginPath();
+  g.arc(m, m, R, 0, Math.PI * 2);
+  g.fill();
+  if (ring) drawRing(g, m, R, base, light, "front");
+  return c;
+}
+
+/** A tilted ring around the planet: the half behind it, or the half in front. */
+function drawRing(g: CanvasRenderingContext2D, m: number, R: number, base: RGB, light: RGB, half: "back" | "front") {
+  g.save();
+  g.translate(m, m);
+  g.rotate(-0.38);
+  g.scale(1, 0.26);
+  g.lineWidth = R * 0.5;
+  const grad = g.createLinearGradient(-R * 1.7, 0, R * 1.7, 0);
+  grad.addColorStop(0, rgb(base, 0.15));
+  grad.addColorStop(0.5, rgb(light, 0.75));
+  grad.addColorStop(1, rgb(base, 0.15));
+  g.strokeStyle = grad;
+  g.beginPath();
+  if (half === "back") g.arc(0, 0, R * 1.45, Math.PI, Math.PI * 2);
+  else g.arc(0, 0, R * 1.45, 0, Math.PI);
+  g.stroke();
+  g.restore();
+}
+
+/** The system: a hub in the middle and worlds around it on a loose shell, each tied to the
+ *  hub and to its nearest neighbours. Fixed (seeded), so it looks the same every visit. */
+function buildSystem(): { planets: Planet[]; links: Link[] } {
+  const r = rng(29);
+  const planets: Planet[] = [{ x: 0, y: 0, z: 0, r: 0.2, color: 0, ring: true }];
+  const n = 9;
+  for (let i = 0; i < n; i++) {
+    // spread over the sphere (a golden-angle spiral), at a varying distance
+    const t = (i + 0.5) / n;
+    const lat = Math.acos(1 - 2 * t) - Math.PI / 2;
+    const lon = i * 2.39996 + r() * 0.4;
+    const d = 0.95 + r() * 0.45;
+    planets.push({
+      x: Math.cos(lat) * Math.cos(lon) * d * 1.25,
+      y: Math.sin(lat) * d * 0.75,
+      z: Math.cos(lat) * Math.sin(lon) * d,
+      r: 0.06 + r() * 0.07,
+      color: 1 + (i % (COLORS.length - 1)),
+      ring: i === 2 || i === 6,
+    });
+  }
+  const links: Link[] = [];
+  const seen = new Set<string>();
+  const add = (a: number, b: number) => {
+    const k = a < b ? `${a}-${b}` : `${b}-${a}`;
+    if (a === b || seen.has(k)) return;
+    seen.add(k);
+    links.push({ a, b, at: r(), speed: 0.12 + r() * 0.18 });
+  };
+  for (let i = 1; i <= n; i++) {
+    if (i % 2 === 1 || i === 2) add(0, i);
+    const near = planets
+      .map((p, j) => ({ j, d: (p.x - planets[i].x) ** 2 + (p.y - planets[i].y) ** 2 + (p.z - planets[i].z) ** 2 }))
+      .filter(({ j }) => j !== 0 && j !== i)
+      .sort((a, b) => a.d - b.d);
+    add(i, near[0].j);
+    if (i % 3 === 0) add(i, near[1].j);
+  }
+  return { planets, links };
+}
 
 export function startLoginScene(canvas: HTMLCanvasElement, opts: LoginSceneOptions): LoginScene {
   let raf = 0;
@@ -66,44 +175,49 @@ export function startLoginScene(canvas: HTMLCanvasElement, opts: LoginSceneOptio
   let diveStart = -1;
   let onDone: (() => void) | null = null;
   let shockAt = -1;
-  let mx = 0.5;
-  let my = 0.5;
-  let sx = 0.5;
-  let sy = 0.5;
-  let travel = 0;
-  let last = 0;
-  let lastLow = 0;
-  const r = rng(13);
-  const streaks: Streak[] = Array.from({ length: 220 }, () => ({ a: r() * 6.283, r: 0.75 + r() * 0.5, z: r(), s: 0.6 + r() * 0.8, hue: r() }));
-  let dust: Dust[] = [];
-  let seededFor = "";
-
-  const onMove = (e: PointerEvent) => {
-    mx = e.clientX / innerWidth;
-    my = e.clientY / innerHeight;
-  };
-  addEventListener("pointermove", onMove, { passive: true });
+  let lastDraw = 0;
+  let angle = 0.6;
+  let lastT = 0;
+  const { planets, links } = buildSystem();
+  let sprites: HTMLCanvasElement[] = [];
+  let spritesFor = "";
+  const order = planets.map((_, i) => i);
+  const screen = planets.map(() => ({ x: 0, y: 0, s: 0, z: 0 }));
 
   const frame = (now: number) => {
     if (stopped) return;
     raf = requestAnimationFrame(frame);
     const still = opts.low();
-    // In low-power mode the scene is drawn twice a second, without motion.
-    if (still && diveStart < 0 && shockAt < 0 && now - lastLow < 500) return;
-    lastLow = now;
+    const busy = diveStart >= 0 || shockAt >= 0;
+    if (now - lastDraw < (still && !busy ? 2000 : 1000 / FPS)) return;
+    lastDraw = now;
+
     const P = opts.palette();
     const night = P.night;
-    const { ctx, W, H } = fitCanvas(canvas);
-    if (seededFor !== `${W}x${H}`) {
-      const d = rng(5);
-      dust = Array.from({ length: Math.round((W * H) / 6000) }, () => ({ x: d(), y: d(), z: 0.2 + d() * 0.8, ph: d() * 6.28 }));
-      seededFor = `${W}x${H}`;
+    const dpr = Math.min(devicePixelRatio || 1, 1.5);
+    const W = innerWidth;
+    const H = innerHeight;
+    const cw = Math.round(W * dpr);
+    const ch = Math.round(H * dpr);
+    if (canvas.width !== cw || canvas.height !== ch) {
+      canvas.width = cw;
+      canvas.height = ch;
     }
-    const time = now / 1000;
-    const dt = Math.min(0.05, last ? time - last : 0.016);
-    last = time;
+    const ctx = canvas.getContext("2d")!;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, W, H);
 
-    // The dive: speed climbs, the throat opens, then a flash.
+    const key = `${night}`;
+    if (key !== spritesFor) {
+      spritesFor = key;
+      sprites = planets.map((p, i) => paintPlanet(p.ring ? 160 : 112, COLORS[p.color], p.ring, night, 40 + i));
+    }
+
+    const t = now / 1000;
+    const dt = Math.min(0.1, lastT ? t - lastT : 0);
+    lastT = t;
+
+    // The dive: the camera closes in on the hub and the system spins up, then a white-out.
     let p = 0;
     if (diveStart >= 0) p = clamp((now - diveStart) / (still ? 300 : 1400), 0, 1);
     const e = easeInOut(p);
@@ -115,131 +229,72 @@ export function startLoginScene(canvas: HTMLCanvasElement, opts: LoginSceneOptio
         shock = -1;
       }
     }
-    const speed = still ? 0 : 0.11 + e * 2.6 + (shock >= 0 ? Math.sin(shock * Math.PI) * -0.08 : 0);
-    travel += speed * dt;
+    const shake = shock >= 0 ? Math.sin(shock * Math.PI) : 0;
+    if (!still) angle += dt * (0.07 + e * 2.4);
 
-    sx += (mx - sx) * 0.05;
-    sy += (my - sy) * 0.05;
-    const S = Math.min(W, H);
-    const cx = W / 2 + (sx - 0.5) * -60;
-    const cy = H * 0.5 + (sy - 0.5) * -40;
-    // the throat curves: its far end sways a little
-    const bend = (z: number) => ({
-      x: cx + Math.sin(time * 0.35 + z * 2.2) * z * S * 0.14 + (sx - 0.5) * z * S * 0.3,
-      y: cy + Math.cos(time * 0.28 + z * 1.7) * z * S * 0.08 + (sy - 0.5) * z * S * 0.22,
+    // Project: turn round the vertical axis, lean the whole system toward the viewer.
+    // The system fills the screen's long side, so the worlds sit around the form, not
+    // behind it: wide on a desktop, tall on a phone.
+    const S = Math.min(W, H) * 0.34;
+    const SX = S * clamp((W / H) * 0.95, 1, 1.7);
+    const SY = S * clamp((H / W) * 0.8, 1, 2);
+    const cx = W / 2;
+    const cy = H / 2;
+    const cam = CAMERA - e * 3.2;
+    const ca = Math.cos(angle);
+    const sa = Math.sin(angle);
+    const tilt = 0.32;
+    const ct = Math.cos(tilt);
+    const st = Math.sin(tilt);
+    planets.forEach((pl, i) => {
+      const x1 = pl.x * ca - pl.z * sa;
+      const z1 = pl.x * sa + pl.z * ca;
+      const y2 = pl.y * ct - z1 * st;
+      const z2 = pl.y * st + z1 * ct;
+      const depth = Math.max(0.15, cam + z2);
+      const k = CAMERA / depth;
+      const jitter = shake ? Math.sin(t * 60 + i * 1.7) * 3 * shake : 0;
+      screen[i] = { x: cx + x1 * SX * k + jitter, y: cy + y2 * SY * k, s: k, z: z2 };
     });
-    const R = S * 0.11 * (1 + e * 0.9);
 
-    // Space itself is the panel's background (scene-cosmos) showing through; this canvas
-    // adds the dust that rushes by and the throat.
-    ctx.globalCompositeOperation = "source-over";
-    ctx.clearRect(0, 0, W, H);
-    for (const s of dust) {
-      const a = (night ? 0.75 : 0.35) * s.z * (still ? 0.8 : 0.55 + 0.45 * Math.sin(time * 1.4 + s.ph));
-      ctx.fillStyle = night ? `rgba(220,235,255,${a})` : `rgba(90,34,230,${a * 0.6})`;
-      const px = s.x * W + (sx - 0.5) * -20 * s.z;
-      const py = s.y * H + (sy - 0.5) * -20 * s.z;
-      ctx.fillRect(px, py, s.z * 1.7, s.z * 1.7);
-    }
-
-    if (night) ctx.globalCompositeOperation = "lighter";
-
-    // The core: the far end of the throat.
-    const far = bend(1);
-    const coreR = S * (0.16 + e * 0.6);
-    const core = ctx.createRadialGradient(far.x, far.y, 0, far.x, far.y, coreR);
-    core.addColorStop(0, night ? "rgba(255,255,255,0.95)" : "rgba(255,255,255,1)");
-    core.addColorStop(0.18, night ? "rgba(160,250,255,0.55)" : "rgba(120,80,255,0.35)");
-    core.addColorStop(0.5, night ? "rgba(139,92,255,0.18)" : "rgba(255,63,216,0.12)");
-    core.addColorStop(1, "rgba(0,0,0,0)");
-    ctx.fillStyle = core;
-    ctx.beginPath();
-    ctx.arc(far.x, far.y, coreR, 0, 6.283);
-    ctx.fill();
-
-    // The rings: far to near.
-    const step = 1 / RINGS;
-    const off = (travel * 3) % step;
-    for (let i = RINGS; i >= 0; i--) {
-      let z = i * step - off + step;
-      if (z <= NEAR) continue;
-      if (z > 1) z = 1;
-      const c = bend(z);
-      const rad = R / z;
-      if (rad > Math.hypot(W, H) * 1.2) continue;
-      const fade = clamp((1 - z) * 1.4, 0, 1) * clamp((z - NEAR) * 6, 0, 1);
-      const idx = Math.floor((travel * 3) / step) - i;
-      let col = neon(idx * 0.06 + time * 0.05, night);
-      let a = fade * (night ? 0.75 : 0.55);
-      // the shock: a pink pulse runs out along the rings
-      if (shock >= 0) {
-        const front = shock * 1.1;
-        const d = Math.abs(1 - z - front);
-        const k = clamp(1 - d * 6, 0, 1) * (1 - shock);
-        if (k > 0) {
-          col = [lerp(col[0], 255, k), lerp(col[1], 60, k), lerp(col[2], 110, k)];
-          a = Math.min(1, a + k * 0.8);
-        }
-      }
-      const tilt = 0.82 + 0.1 * Math.sin(time * 0.5);
-      ctx.lineWidth = clamp(2.2 / z, 1, 7) * (night ? 1 : 0.8);
-      ctx.strokeStyle = rgb(col, a * 0.22);
+    // Links, far ones fainter; light runs along each one.
+    const red: RGB = [255, 77, 109];
+    ctx.lineCap = "round";
+    for (const l of links) {
+      const a = screen[l.a];
+      const b = screen[l.b];
+      const near = clamp(1 - ((a.z + b.z) / 2 + 1.2) / 2.6, 0.15, 1);
+      const col: RGB = shake > 0 ? red : night ? [120, 220, 255] : [90, 34, 230];
+      ctx.strokeStyle = rgb(col, (night ? 0.32 : 0.22) * near * (1 - e) + shake * 0.35);
+      ctx.lineWidth = 0.7 + near * 0.9;
       ctx.beginPath();
-      ctx.ellipse(c.x, c.y, rad, rad * tilt, Math.sin(time * 0.2) * 0.15, 0, 6.283);
+      ctx.moveTo(a.x, a.y);
+      ctx.lineTo(b.x, b.y);
       ctx.stroke();
-      ctx.lineWidth = clamp(0.9 / z, 0.6, 2.6);
-      ctx.strokeStyle = rgb(col, a);
-      ctx.stroke();
-      // beads of light running round each ring
-      if (!still) {
-        const n = 6;
-        for (let j = 0; j < n; j++) {
-          const ang = (j / n) * 6.283 + time * (0.4 + (i % 3) * 0.12) * (i % 2 ? 1 : -1);
-          const bx = c.x + Math.cos(ang) * rad;
-          const by = c.y + Math.sin(ang) * rad * tilt;
-          const br = clamp(1.6 / z, 0.8, 5);
-          ctx.fillStyle = rgb(col, a);
-          ctx.beginPath();
-          ctx.arc(bx, by, br, 0, 6.283);
-          ctx.fill();
-        }
-      }
+      if (!still) l.at = (l.at + dt * l.speed * (1 + e * 6)) % 1;
+      const px = a.x + (b.x - a.x) * l.at;
+      const py = a.y + (b.y - a.y) * l.at;
+      const pr = 1.2 + near * 1.6;
+      ctx.fillStyle = rgb(shake > 0 ? red : night ? [210, 250, 255] : [120, 60, 240], 0.9 * near * (1 - e));
+      ctx.fillRect(px - pr, py - pr, pr * 2, pr * 2);
+      ctx.fillStyle = rgb(shake > 0 ? red : night ? [34, 243, 255] : [90, 34, 230], 0.18 * near * (1 - e));
+      ctx.fillRect(px - pr * 3, py - pr * 3, pr * 6, pr * 6);
     }
 
-    // Streaks of light rushing past along the walls.
-    if (!still || p > 0) {
-      ctx.lineCap = "round";
-      for (const s of streaks) {
-        s.z -= speed * dt * s.s * 1.6;
-        if (s.z <= NEAR) {
-          s.z = 1;
-          s.a = Math.random() * 6.283;
-        }
-        const z0 = s.z;
-        const z1 = Math.min(1, s.z + (0.012 + speed * 0.1 * s.s) * s.z);
-        const c0 = bend(z0);
-        const c1 = bend(z1);
-        const x0 = c0.x + Math.cos(s.a) * s.r * (R / z0);
-        const y0 = c0.y + Math.sin(s.a) * s.r * (R / z0) * 0.85;
-        const x1 = c1.x + Math.cos(s.a) * s.r * (R / z1);
-        const y1 = c1.y + Math.sin(s.a) * s.r * (R / z1) * 0.85;
-        const a = clamp((1 - z0) * 1.6, 0, 1) * (night ? 0.9 : 0.6);
-        ctx.strokeStyle = rgb(neon(s.hue, night), a);
-        ctx.lineWidth = clamp(1 / z0, 0.5, 2.6);
-        ctx.beginPath();
-        ctx.moveTo(x0, y0);
-        ctx.lineTo(x1, y1);
-        ctx.stroke();
-      }
+    // Planets, back to front.
+    order.sort((i, j) => screen[j].z - screen[i].z);
+    for (const i of order) {
+      const pl = planets[i];
+      const sp = screen[i];
+      const img = sprites[i];
+      // the sprite holds the planet in its middle 70%, with the ring a little wider
+      const size = (pl.r * S * sp.s * 2) / 0.7;
+      if (size < 1 || sp.s > 40) continue;
+      const fade = clamp(1 - (sp.z + 1.4) / 3.4, 0.35, 1);
+      ctx.globalAlpha = fade * (night ? 1 : 0.85);
+      ctx.drawImage(img, sp.x - size / 2, sp.y - size / 2, size, size);
     }
-    ctx.globalCompositeOperation = "source-over";
-
-    // A soft vignette keeps the edges deep.
-    const vig = ctx.createRadialGradient(W / 2, H / 2, S * 0.35, W / 2, H / 2, Math.hypot(W, H) * 0.62);
-    vig.addColorStop(0, "rgba(0,0,0,0)");
-    vig.addColorStop(1, night ? "rgba(2,1,8,0.55)" : "rgba(120,100,200,0.14)");
-    ctx.fillStyle = vig;
-    ctx.fillRect(0, 0, W, H);
+    ctx.globalAlpha = 1;
 
     // The end of the dive: a white-out, then the dashboard.
     if (p > 0.55) {
@@ -253,6 +308,11 @@ export function startLoginScene(canvas: HTMLCanvasElement, opts: LoginSceneOptio
       done();
     }
   };
+  const onVisible = () => {
+    lastDraw = 0;
+    lastT = 0;
+  };
+  document.addEventListener("visibilitychange", onVisible);
   raf = requestAnimationFrame(frame);
 
   return {
@@ -267,7 +327,7 @@ export function startLoginScene(canvas: HTMLCanvasElement, opts: LoginSceneOptio
     stop() {
       stopped = true;
       cancelAnimationFrame(raf);
-      removeEventListener("pointermove", onMove);
+      document.removeEventListener("visibilitychange", onVisible);
     },
   };
 }

@@ -699,7 +699,7 @@ pub fn create_links_as(
     if servers.len() < 2 || hub_server.as_ref().is_some_and(|h| !servers.contains(h)) {
         bail!("bad_input");
     }
-    let id = hub.ops.begin("network", network)?;
+    let id = hub.begin_op("network", network)?;
     let hub = hub.clone();
     let (op, network) = (id.clone(), network.to_owned());
     tokio::spawn(async move {
@@ -724,7 +724,7 @@ pub fn set_link_family(hub: &Arc<Hub>, id: &str, ipv6: bool) -> Result<String> {
     let Some(link) = hub.networks.links(None)?.into_iter().find(|l| l.id == id) else {
         bail!("no_such_link");
     };
-    let op = hub.ops.begin("network", &link.network)?;
+    let op = hub.begin_op("network", &link.network)?;
     let hub = hub.clone();
     let id = op.clone();
     tokio::spawn(async move {

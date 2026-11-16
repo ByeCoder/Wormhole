@@ -2652,6 +2652,37 @@ async fn a_multi_tunnel_keeps_sessions_over_every_transport() {
         let mut back = [0u8; 5];
         user.read_exact(&mut back).await.unwrap();
         assert_eq!(&back, b"multi");
+        // The status shows each transport's share: all four with a live session, and the
+        // user's five bytes counted on the one that carried them (the entry sent them).
+        drop(user);
+        let status = status_of(tunnel.control.as_ref().unwrap()).await;
+        let mut names: Vec<&str> = status
+            .peer
+            .by_transport
+            .iter()
+            .map(|t| t.transport.as_str())
+            .collect();
+        names.sort_unstable();
+        assert_eq!(
+            names,
+            ["quic", "tcpmux", "ws", "xhttp"],
+            "{mode}: {status:?}"
+        );
+        assert!(
+            status.peer.by_transport.iter().all(|t| t.sessions >= 1),
+            "{mode}: {status:?}"
+        );
+        let carried: Vec<_> = status
+            .peer
+            .by_transport
+            .iter()
+            .filter(|t| t.bytes_sent >= 5 && t.bytes_received >= 5)
+            .collect();
+        assert!(!carried.is_empty(), "{mode}: {status:?}");
+        assert!(
+            carried.iter().all(|t| t.streams_total >= 1),
+            "{mode}: {status:?}"
+        );
     }
 }
 

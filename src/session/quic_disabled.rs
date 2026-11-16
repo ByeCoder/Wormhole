@@ -18,6 +18,14 @@ impl QuicSession {
         match *self {}
     }
 
+    pub fn set_usage(&self, _: std::sync::Arc<super::TransportUsage>) {
+        match *self {}
+    }
+
+    pub fn usage(&self) -> Option<&std::sync::Arc<super::TransportUsage>> {
+        match *self {}
+    }
+
     pub fn open(&self, _: Bytes) -> io::Result<QuicStream> {
         match *self {}
     }

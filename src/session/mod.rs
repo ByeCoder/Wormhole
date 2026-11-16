@@ -13,6 +13,8 @@ pub mod quic;
 pub mod quic;
 
 use std::io;
+use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+use std::sync::Arc;
 
 use bytes::Bytes;
 
@@ -21,6 +23,17 @@ use quic::{QuicSession, QuicStream};
 
 pub use crate::mux::ResetReason;
 pub use manager::{is_full, maintain, SessionPool};
+
+/// What went over the sessions of one transport of an `auto` or `multi` tunnel, since the
+/// tunnel started: shared by all its sessions (see [`crate::stats::Peer::session_up`]).
+#[derive(Debug, Default)]
+pub struct TransportUsage {
+    /// Streams (user connections, UDP flows, probes) opened over it, by either side.
+    pub streams: AtomicU64,
+    /// Payload bytes this side sent and received, datagrams included.
+    pub sent: AtomicU64,
+    pub received: AtomicU64,
+}
 
 /// One tunnel connection carrying streams and datagrams.
 pub enum Session {
@@ -46,28 +59,52 @@ impl Session {
         }
     }
 
+    /// Counts this session's streams and bytes into `usage` (once; later calls change
+    /// nothing). Streams opened before keep going uncounted.
+    pub fn set_usage(&self, usage: Arc<TransportUsage>) {
+        match self {
+            Self::Kmux(s) => s.set_usage(usage),
+            Self::Quic(s) => s.set_usage(usage),
+        }
+    }
+
+    fn usage(&self) -> Option<Arc<TransportUsage>> {
+        let usage = match self {
+            Self::Kmux(s) => s.usage(),
+            Self::Quic(s) => s.usage(),
+        }?;
+        usage.streams.fetch_add(1, Relaxed);
+        Some(usage.clone())
+    }
+
     /// Opens a stream whose first bytes are `syn` (the open request). Data can be sent
     /// right away; the peer answers a failed open with a reset.
     pub fn open(&self, syn: Bytes) -> io::Result<SessionStream> {
-        match self {
-            Self::Kmux(s) => s.open(syn).map(SessionStream::Kmux),
-            Self::Quic(s) => s.open(syn).map(SessionStream::Quic),
-        }
+        let inner = match self {
+            Self::Kmux(s) => s.open(syn).map(Inner::Kmux),
+            Self::Quic(s) => s.open(syn).map(Inner::Quic),
+        }?;
+        Ok(SessionStream {
+            inner,
+            usage: self.usage(),
+        })
     }
 
     /// Waits for a stream the peer opened, with its open request. `None` once the
     /// session is closed or going away.
     pub async fn accept(&self) -> Option<(SessionStream, Bytes)> {
-        match self {
+        let (inner, syn) = match self {
             Self::Kmux(s) => s
                 .accept()
                 .await
-                .map(|(stream, syn)| (SessionStream::Kmux(stream), syn)),
+                .map(|(stream, syn)| (Inner::Kmux(stream), syn)),
             Self::Quic(s) => s
                 .accept()
                 .await
-                .map(|(stream, syn)| (SessionStream::Quic(stream), syn)),
-        }
+                .map(|(stream, syn)| (Inner::Quic(stream), syn)),
+        }?;
+        let usage = self.usage();
+        Some((SessionStream { inner, usage }, syn))
     }
 
     /// No new streams in either direction; existing ones continue.
@@ -152,74 +189,127 @@ impl Session {
 /// One stream of a [`Session`]: a user TCP connection, or a UDP flow (whose packets
 /// travel as datagrams).
 #[derive(Debug)]
-pub enum SessionStream {
+pub struct SessionStream {
+    inner: Inner,
+    /// Where its bytes are counted (a stream of an `auto` or `multi` tunnel).
+    usage: Option<Arc<TransportUsage>>,
+}
+
+#[derive(Debug)]
+enum Inner {
     Kmux(MuxStream),
     Quic(QuicStream),
+}
+
+impl From<MuxStream> for SessionStream {
+    fn from(s: MuxStream) -> Self {
+        Self {
+            inner: Inner::Kmux(s),
+            usage: None,
+        }
+    }
+}
+
+impl From<QuicStream> for SessionStream {
+    fn from(s: QuicStream) -> Self {
+        Self {
+            inner: Inner::Quic(s),
+            usage: None,
+        }
+    }
 }
 
 impl SessionStream {
     /// Sends `data`, waiting for flow-control credit as needed.
     pub async fn send(&self, data: Bytes) -> io::Result<()> {
-        match self {
-            Self::Kmux(s) => s.send(data).await,
-            Self::Quic(s) => s.send(data).await,
+        let n = data.len() as u64;
+        match &self.inner {
+            Inner::Kmux(s) => s.send(data).await,
+            Inner::Quic(s) => s.send(data).await,
+        }?;
+        self.count_sent(n);
+        Ok(())
+    }
+
+    fn count_sent(&self, n: u64) {
+        if let Some(u) = &self.usage {
+            u.sent.fetch_add(n, Relaxed);
+        }
+    }
+
+    fn count_received(&self, n: usize) {
+        if let Some(u) = &self.usage {
+            u.received.fetch_add(n as u64, Relaxed);
         }
     }
 
     /// Receives the next chunk of data; `None` at the end of the stream.
     pub async fn recv(&self) -> io::Result<Option<Bytes>> {
-        match self {
-            Self::Kmux(s) => s.recv().await,
-            Self::Quic(s) => s.recv().await,
+        let data = match &self.inner {
+            Inner::Kmux(s) => s.recv().await,
+            Inner::Quic(s) => s.recv().await,
+        }?;
+        if let Some(d) = &data {
+            self.count_received(d.len());
         }
+        Ok(data)
     }
 
     /// Half close: no more data from this side.
     pub fn finish(&self) -> io::Result<()> {
-        match self {
-            Self::Kmux(s) => s.finish(),
-            Self::Quic(s) => s.finish(),
+        match &self.inner {
+            Inner::Kmux(s) => s.finish(),
+            Inner::Quic(s) => s.finish(),
         }
     }
 
     /// Aborts the stream and tells the peer why.
     pub fn reset(self, reason: ResetReason) {
-        match self {
-            Self::Kmux(s) => s.reset(reason),
-            Self::Quic(s) => s.reset(reason),
+        match self.inner {
+            Inner::Kmux(s) => s.reset(reason),
+            Inner::Quic(s) => s.reset(reason),
         }
     }
 
     /// Why the stream was reset, once it has been (by either side).
     pub fn reset_reason(&self) -> Option<ResetReason> {
-        match self {
-            Self::Kmux(s) => s.reset_reason(),
-            Self::Quic(s) => s.reset_reason(),
+        match &self.inner {
+            Inner::Kmux(s) => s.reset_reason(),
+            Inner::Quic(s) => s.reset_reason(),
         }
     }
 
     /// Queues one datagram; never waits. False if it was dropped or cannot be sent.
     pub fn send_datagram(&self, packet: Bytes) -> bool {
-        match self {
-            Self::Kmux(s) => s.send_datagram(packet),
-            Self::Quic(s) => s.send_datagram(packet),
+        let n = packet.len() as u64;
+        let sent = match &self.inner {
+            Inner::Kmux(s) => s.send_datagram(packet),
+            Inner::Quic(s) => s.send_datagram(packet),
+        };
+        if sent {
+            self.count_sent(n);
         }
+        sent
     }
 
     /// Whether a datagram of `len` bytes would be sent where it may be lost (KCP's
     /// datagram path, a QUIC datagram), rather than reliably in the connection.
     pub fn sends_unreliably(&self, len: usize) -> bool {
-        match self {
-            Self::Kmux(s) => s.sends_unreliably(len),
-            Self::Quic(s) => s.sends_unreliably(len),
+        match &self.inner {
+            Inner::Kmux(s) => s.sends_unreliably(len),
+            Inner::Quic(s) => s.sends_unreliably(len),
         }
     }
 
     /// Receives the next datagram, whole; `None` once the peer finished the stream.
     pub async fn recv_datagram(&self) -> io::Result<Option<Bytes>> {
-        match self {
-            Self::Kmux(s) => s.recv_datagram().await,
-            Self::Quic(s) => s.recv_datagram().await,
+        let packet = match &self.inner {
+            Inner::Kmux(s) => s.recv_datagram().await,
+            Inner::Quic(s) => s.recv_datagram().await,
+        }?;
+        if let Some(p) = &packet {
+            self.count_received(p.len());
         }
+        Ok(packet)
     }
 }

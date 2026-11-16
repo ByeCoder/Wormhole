@@ -203,6 +203,8 @@ pub struct Peer {
     max_streams: u64,
     /// New connections that found every session full.
     full: AtomicU64,
+    /// An `auto` or `multi` tunnel: what went over each transport, in the order first seen.
+    by_transport: Mutex<Vec<(&'static str, Arc<crate::session::TransportUsage>)>>,
 }
 
 impl Peer {
@@ -214,6 +216,19 @@ impl Peer {
     /// A session to the other side is up (the handshake succeeded).
     pub fn session_up(&self, session: &Arc<Session>) {
         self.link_up();
+        if let Some(name) = session.transport() {
+            let mut by = lock(&self.by_transport);
+            let usage = match by.iter().find(|(n, _)| *n == name) {
+                Some((_, u)) => u.clone(),
+                None => {
+                    let u = Arc::default();
+                    by.push((name, Arc::clone(&u)));
+                    u
+                }
+            };
+            drop(by);
+            session.set_usage(usage);
+        }
         let mut live = lock(&self.live);
         live.retain(|(_, s)| s.upgrade().is_some_and(|s| !s.is_closed()));
         live.push((Instant::now(), Arc::downgrade(session)));
@@ -263,7 +278,32 @@ impl Peer {
         // A draining session still carries its streams but takes no new ones.
         let streams = sessions.iter().map(|(_, s)| s.stream_count() as u64).sum();
         let open_sessions = sessions.iter().filter(|(_, s)| !s.is_draining()).count() as u64;
+        // Each transport's share: its live sessions now, and what went over it so far.
+        let by_transport = lock(&self.by_transport)
+            .iter()
+            .map(|(name, u)| {
+                let mine: Vec<&Arc<Session>> = sessions
+                    .iter()
+                    .map(|(_, s)| s)
+                    .filter(|s| s.transport() == Some(*name))
+                    .collect();
+                let rtts: Vec<Duration> = mine.iter().filter_map(|s| s.rtt()).collect();
+                TransportShare {
+                    transport: (*name).to_owned(),
+                    sessions: mine.len() as u64,
+                    streams_open: mine.iter().map(|s| s.stream_count() as u64).sum(),
+                    streams_total: u.streams.load(Relaxed),
+                    bytes_sent: u.sent.load(Relaxed),
+                    bytes_received: u.received.load(Relaxed),
+                    rtt_ms: (!rtts.is_empty()).then(|| {
+                        let mean = rtts.iter().sum::<Duration>() / rtts.len() as u32;
+                        (mean.as_secs_f64() * 10_000.0).round() / 10.0
+                    }),
+                }
+            })
+            .collect();
         PeerStatus {
+            by_transport,
             transport: (!via.is_empty()).then(|| via.join("+")),
             connected,
             sessions: mux.then_some(sessions.len() as u64),
@@ -571,6 +611,27 @@ pub struct PeerStatus {
     /// New connections that failed because every session was full.
     #[serde(default)]
     pub full: u64,
+    /// An `auto` or `multi` tunnel: each transport's sessions and what went over it since
+    /// the tunnel started; empty for the others.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub by_transport: Vec<TransportShare>,
+}
+
+/// One transport of an `auto` or `multi` tunnel, in [`PeerStatus::by_transport`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TransportShare {
+    pub transport: String,
+    /// Its live sessions now.
+    pub sessions: u64,
+    /// Streams open over it now, and opened over it since the tunnel started (user
+    /// connections, UDP flows and the health probe's).
+    pub streams_open: u64,
+    pub streams_total: u64,
+    /// Payload bytes this side sent over it and received from it.
+    pub bytes_sent: u64,
+    pub bytes_received: u64,
+    /// Mean round trip of its live sessions; `null` when unknown.
+    pub rtt_ms: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

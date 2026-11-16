@@ -132,7 +132,6 @@ export function Login({
   return (
     <section id="login" className="screen is-on" aria-labelledby="login-title">
       <canvas id="login-scene" ref={canvas} aria-hidden="true" />
-      <div className="login-grid" aria-hidden="true" />
       <div className="login-top">
         <div className="brand">
           <span className="brand-mark">

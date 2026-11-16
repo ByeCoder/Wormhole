@@ -439,7 +439,9 @@ verify_signature() {
     printf '%s\n' "$RELEASE_KEY_PEM" >"$dir/release-key.pem"
     openssl pkeyutl -verify -pubin -inkey "$dir/release-key.pem" -rawin \
         -in "$file.sha256" -sigfile "$file.sig" >/dev/null 2>&1 ||
-        die "The signature does not match: this download is not from the Wormhole release key. Nothing was installed."
+        die "The signature does not match: this download is not from the Wormhole release key. Nothing was installed.
+  If this wormhole-manager was installed before 1.2.0 it still has the old key: get the current one with
+  bash <(curl -fsSL $RAW_URL)"
     # The signed checksum file must name this archive, so a signed archive of another CPU
     # cannot be put in its place.
     [[ "$(awk '{print $2}' "$file.sha256" | sed 's/^\*//')" == "$name.tar.gz" ]] ||

@@ -73,7 +73,7 @@ pub fn init_with_cert(
     } else {
         let config = Config {
             listen: format!("0.0.0.0:{}", port.map_or_else(random_port, Ok)?),
-            path: format!("k-{}", random_hex(4)?),
+            path: format!("{}{}", config::PATH_PREFIX, random_hex(4)?),
             data_dir: data_dir.to_path_buf(),
             agent_listen: Some(format!("0.0.0.0:{}", random_port()?)),
             wormhole_dir: std::path::PathBuf::from("/etc/wormhole"),
@@ -114,7 +114,7 @@ mod tests {
         );
         let first = init(&config_path, &data, Some(24_680)).unwrap();
         assert_eq!(first.config.listen, "0.0.0.0:24680");
-        assert!(first.config.path.starts_with("k-") && first.config.path.len() == 10);
+        assert!(first.config.path.starts_with("w-") && first.config.path.len() == 10);
         assert!(config_path.exists() && first.config.database().exists());
 
         let second = init(&config_path, &data, Some(1)).unwrap();

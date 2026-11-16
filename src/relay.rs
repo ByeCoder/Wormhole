@@ -208,7 +208,7 @@ mod tests {
         );
         let remote = near.open(Bytes::from_static(b"open")).unwrap();
         let (stream, _) = far.accept().await.unwrap();
-        let stream = SessionStream::Kmux(stream);
+        let stream = SessionStream::from(stream);
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let mut user = TcpStream::connect(listener.local_addr().unwrap())
@@ -251,7 +251,7 @@ mod tests {
         );
         let remote = near.open(Bytes::from_static(b"open")).unwrap();
         let (stream, _) = far.accept().await.unwrap();
-        let stream = SessionStream::Kmux(stream);
+        let stream = SessionStream::from(stream);
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let mut user = TcpStream::connect(listener.local_addr().unwrap())

@@ -2,7 +2,7 @@
   "name": "wormhole-site",
   "private": true,
   "type": "module",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "scripts": {
     "prepare-assets": "node scripts/prepare.mjs",
     "dev": "npm run prepare-assets && astro dev",

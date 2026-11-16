@@ -16,10 +16,10 @@ wormhole-manager panel install
 `panel install` اول می‌پرسد پنل را چطور باز می‌کنید و برایش گواهی می‌گیرد (پایین‌تر توضیح داده‌ام)، بعد تنظیم‌ها را می‌نویسد، پایگاه‌داده را می‌سازد، سرویس `wormhole-panel` را راه می‌اندازد و این را چاپ می‌کند:
 
 ```text
-  address       https://203.0.113.5:28443/k-7f3a9c2e/
+  address       https://203.0.113.5:28443/w-7f3a9c2e/
   certificate   /etc/letsencrypt/live/wormhole-panel-203-0-113-5/fullchain.pem
   agents        port 22230: TCP and UDP, and TCP and UDP 22231 (open them for the servers you add)
-  sign in       https://203.0.113.5:28443/k-7f3a9c2e/#t=...
+  sign in       https://203.0.113.5:28443/w-7f3a9c2e/#t=...
 ```
 
 - **آدرس** یک مسیر مخفی دارد و پنل فقط همان‌جا جواب می‌دهد. هر آدرس دیگری همان صفحهٔ ساده‌ی «404 Not Found» یک nginx را می‌گیرد، پس اسکنر چیزی پیدا نمی‌کند.

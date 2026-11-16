@@ -1622,3 +1622,18 @@ label.sp-opt { display: inline-flex; align-items: center; gap: var(--sp-2); min-
   .us-chart-wait { animation: none; }
 }
 .cal-arrow { display: inline-flex; }
+
+/* a tunnel's transports side by side (auto, multi) */
+.shares-table td { vertical-align: middle; }
+.shares-table tr.is-down td { opacity: 0.55; }
+.share-bar {
+  display: inline-block;
+  width: 72px;
+  height: 6px;
+  margin-inline-end: var(--sp-2);
+  border-radius: 3px;
+  background: var(--card-2);
+  vertical-align: middle;
+  overflow: hidden;
+}
+.share-bar > span { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--accent), var(--accent-2)); }
