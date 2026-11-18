@@ -811,9 +811,10 @@ remove_net_links() {
 remove_saved_links() {
     local file=$1 link
     command -v ip >/dev/null && [[ -f "$file" ]] || return 0
-    for link in $(sed -n 's/^name = "\(kz-[a-z0-9]*\)"$/\1/p' "$file"); do
+    while read -r link; do
+        [[ -n "$link" ]] || continue
         ip link del "$link" 2>/dev/null && info "Removed the private network link $link."
-    done
+    done < <(sed -n 's/^name = "\(kz-[a-z0-9]*\)"$/\1/p' "$file")
     return 0
 }
 
