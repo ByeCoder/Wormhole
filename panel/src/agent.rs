@@ -22,6 +22,10 @@ use crate::manage::{self, Services};
 use crate::wire::{Ack, HelloReply, Request, SpeedPoll, SpeedStarted, MAX_REQUEST};
 
 pub const DEFAULT_AGENT_CONFIG: &str = "/etc/wormhole-panel/agent.toml";
+/// The agents of the other panels a server is joined to: `panels/NAME/agent.toml`, each in
+/// its own folder (its private networks, link transport and updates beside it) and its own
+/// service (`wormhole-agent@NAME`).
+pub const PANELS_DIR: &str = "/etc/wormhole-panel/panels";
 pub const DEFAULT_WORMHOLE_DIR: &str = "/etc/wormhole";
 
 /// The agent's identity and where the panel is: `/etc/wormhole-panel/agent.toml`.
@@ -117,6 +121,53 @@ pub(crate) fn write_private(path: &Path, data: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// The name of the agent whose settings are at `path` when it is one of a further panel's
+/// (`…/panels/NAME/agent.toml`); `None` for the first one.
+pub fn owner_of(path: &Path) -> Option<String> {
+    let dir = path.parent()?;
+    let panels = dir.parent()?;
+    if panels.file_name()? != "panels" {
+        return None;
+    }
+    let name = dir.file_name()?.to_str()?;
+    valid_panel_name(name).then(|| name.to_owned())
+}
+
+/// A further panel's agent name: what its folder and service are called.
+pub fn valid_panel_name(name: &str) -> bool {
+    (1..=32).contains(&name.len())
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        && !name.starts_with('-')
+}
+
+/// The saved private-network links of the other agents on this server (the first panel's,
+/// a panel's own, and each further panel's), besides the one at `own`.
+fn other_net_states(own: &Path) -> Vec<PathBuf> {
+    if own.as_os_str().is_empty() {
+        return Vec::new();
+    }
+    let mine = own.with_file_name("net.toml");
+    let mut all = vec![
+        Path::new(DEFAULT_AGENT_CONFIG).with_file_name("net.toml"),
+        Path::new(crate::config::DEFAULT_DATA_DIR).join("net.toml"),
+    ];
+    if let Ok(entries) = std::fs::read_dir(PANELS_DIR) {
+        all.extend(entries.flatten().map(|e| e.path().join("net.toml")));
+    }
+    all.retain(|p| *p != mine);
+    all
+}
+
+/// Its systemd service.
+pub fn unit_of(path: &Path) -> String {
+    match owner_of(path) {
+        Some(name) => format!("wormhole-agent@{name}"),
+        None => "wormhole-agent".to_owned(),
+    }
+}
+
 /// What the agent proves its key with: the keyed hash of the panel's challenge.
 pub fn proof(key_hex: &str, challenge: &str) -> Option<String> {
     let key = hex_to_key(key_hex)?;
@@ -162,6 +213,9 @@ pub struct Agent {
     services: Arc<dyn Services>,
     net: crate::net::Net,
     update: crate::agent_update::AgentUpdate,
+    /// On a server joined to more than one panel: which panel's agent this is (`None`: the
+    /// first); it sees and changes only that panel's tunnels.
+    owner: Option<String>,
 }
 
 impl Agent {
@@ -205,7 +259,9 @@ impl Agent {
         launcher: Box<dyn crate::agent_update::Launcher>,
     ) -> Arc<Self> {
         let config_key = config.release_key.clone();
+        let owner = owner_of(path);
         Arc::new(Self {
+            owner,
             bench: crate::bench::Listeners::default(),
             speed_jobs: Arc::default(),
             path: path.to_path_buf(),
@@ -216,7 +272,8 @@ impl Agent {
             net: crate::net::Net::with_exec(
                 (!path.as_os_str().is_empty()).then(|| path.with_file_name("net.toml")),
                 exec,
-            ),
+            )
+            .with_others(other_net_states(path)),
             update: crate::agent_update::AgentUpdate::new(
                 path.with_file_name("updates"),
                 path.to_path_buf(),
@@ -226,7 +283,8 @@ impl Agent {
                     .unwrap_or_default()
                     .with_file_name("wormhole"),
                 launcher,
-            ),
+            )
+            .with_unit(unit_of(path)),
         })
     }
 
@@ -344,7 +402,50 @@ impl Agent {
     }
 
     /// The answer to one request, as JSON.
+    /// Whether this agent may act on the tunnel `name` (its own, or none yet).
+    fn mine(&self, name: &str) -> Result<()> {
+        manage::mine(&self.config().wormhole_dir, name, self.owner.as_deref())
+    }
+
     pub async fn handle(&self, request: Request) -> Vec<u8> {
+        // A tunnel that another panel on this server manages is not this one's to see or
+        // touch: the same answer as for anything that failed.
+        let name = match &request {
+            Request::TunnelGet { name }
+            | Request::TunnelDelete { name }
+            | Request::TunnelRevert { name }
+            | Request::TunnelCtl { name, .. }
+            | Request::Logs { name, .. }
+            | Request::Speedtest { name, .. }
+            | Request::SpeedtestStart { name, .. } => Some(name.clone()),
+            Request::TunnelPut { spec } | Request::TunnelCheck { spec } => Some(spec.name.clone()),
+            _ => None,
+        };
+        if let Some(Err(e)) = name.as_deref().map(|n| self.mine(n)) {
+            return match request {
+                Request::TunnelPut { .. } => to_json(&crate::wire::PutReply {
+                    ok: false,
+                    error: Some(format!("{e:#}")),
+                    pin: None,
+                }),
+                Request::Logs { .. } | Request::Speedtest { .. } => {
+                    to_json(&crate::wire::TextReply {
+                        ok: false,
+                        error: Some(format!("{e:#}")),
+                        text: String::new(),
+                    })
+                }
+                Request::SpeedtestStart { .. } => to_json(&SpeedStarted {
+                    ok: false,
+                    error: Some(format!("{e:#}")),
+                    id: String::new(),
+                }),
+                _ => to_json(&Ack {
+                    ok: false,
+                    error: Some(format!("{e:#}")),
+                }),
+            };
+        }
         match request {
             Request::Hello { challenge } => {
                 let c = self.config();
@@ -391,9 +492,14 @@ impl Agent {
                     .sample();
                 to_json(&health)
             }
-            Request::Tunnels => {
-                to_json(&collect::tunnels(&self.config().wormhole_dir, &*self.services).await)
-            }
+            Request::Tunnels => to_json(
+                &collect::tunnels_of(
+                    &self.config().wormhole_dir,
+                    &*self.services,
+                    self.owner.as_deref(),
+                )
+                .await,
+            ),
             Request::TunnelCheck { spec } => {
                 let dir = self.config().wormhole_dir;
                 let owners = tokio::task::spawn_blocking(manage::ports)
@@ -403,7 +509,11 @@ impl Agent {
             }
             Request::TunnelPut { spec } => {
                 let dir = self.config().wormhole_dir;
-                to_json(&match manage::put(&dir, &spec) {
+                let put = manage::put(&dir, &spec).and_then(|pin| {
+                    manage::claim(&dir, &spec.name, self.owner.as_deref())?;
+                    Ok(pin)
+                });
+                to_json(&match put {
                     Ok(pin) => crate::wire::PutReply {
                         ok: true,
                         error: None,
@@ -1097,5 +1207,131 @@ target = \"127.0.0.1:443\"
         let tunnels: Vec<crate::wire::TunnelInfo> =
             serde_json::from_slice(&agent.handle(Request::Tunnels).await).unwrap();
         assert!(tunnels.is_empty());
+    }
+
+    #[test]
+    fn a_further_panels_agent_is_named_by_its_folder() {
+        assert_eq!(owner_of(Path::new("/etc/wormhole-panel/agent.toml")), None);
+        assert_eq!(
+            owner_of(Path::new("/etc/wormhole-panel/panels/panel2/agent.toml")).as_deref(),
+            Some("panel2")
+        );
+        assert_eq!(
+            owner_of(Path::new("/etc/wormhole-panel/panels/Bad_Name/agent.toml")),
+            None
+        );
+        assert_eq!(
+            unit_of(Path::new("/etc/wormhole-panel/agent.toml")),
+            "wormhole-agent"
+        );
+        assert_eq!(
+            unit_of(Path::new("/x/panels/eu-1/agent.toml")),
+            "wormhole-agent@eu-1"
+        );
+    }
+
+    /// Two panels on one server: each agent lists, reads, changes and removes only the
+    /// tunnels it made, and a name the other one uses is refused.
+    #[tokio::test]
+    async fn each_panel_sees_and_touches_only_its_own_tunnels() {
+        let root = tempfile::tempdir().unwrap();
+        let tunnels = root.path().join("wormhole");
+        std::fs::create_dir_all(&tunnels).unwrap();
+        let config = || {
+            let mut c = AgentConfig::from_join(&JoinCode {
+                p: "x:1".into(),
+                t: "t".repeat(64),
+                j: "j".into(),
+                n: None,
+                x: None,
+                g: None,
+                l: None,
+            });
+            c.wormhole_dir = tunnels.clone();
+            c
+        };
+        let services = || -> Arc<dyn Services> {
+            Arc::new(manage::Processes::new(&tunnels, Path::new("/bin/false")))
+        };
+        let first = Agent::with_services(&root.path().join("agent.toml"), config(), services());
+        let second = Agent::with_services(
+            &root.path().join("panels/panel2/agent.toml"),
+            config(),
+            services(),
+        );
+        let spec = |name: &str| crate::wire::Spec {
+            name: name.into(),
+            role: "entry".into(),
+            mode: "reverse".into(),
+            transport: "tcpmux".into(),
+            listen: Some("0.0.0.0:3080".into()),
+            token: Some("a".repeat(48)),
+            forwards: vec![crate::wire::ForwardInfo {
+                listen: "0.0.0.0:8443".into(),
+                target: "127.0.0.1:443".into(),
+                protocol: "tcp".into(),
+            }],
+            ..Default::default()
+        };
+        let put = |agent: &Arc<Agent>, name: &str| {
+            let agent = agent.clone();
+            let spec = spec(name);
+            async move {
+                let reply: crate::wire::PutReply =
+                    serde_json::from_slice(&agent.handle(Request::TunnelPut { spec }).await)
+                        .unwrap();
+                reply
+            }
+        };
+        let names = |agent: &Arc<Agent>| {
+            let agent = agent.clone();
+            async move {
+                let list: Vec<crate::wire::TunnelInfo> =
+                    serde_json::from_slice(&agent.handle(Request::Tunnels).await).unwrap();
+                list.into_iter().map(|t| t.name).collect::<Vec<_>>()
+            }
+        };
+        let made = put(&first, "one").await;
+        assert!(made.ok, "{made:?}");
+        assert!(put(&second, "two").await.ok);
+        assert_eq!(names(&first).await, ["one"]);
+        assert_eq!(names(&second).await, ["two"]);
+        assert_eq!(manage::owner(&tunnels, "two").as_deref(), Some("panel2"));
+        // The other panel's name: refused, and its tunnel is left as it was.
+        let refused = put(&second, "one").await;
+        assert!(!refused.ok);
+        assert!(
+            refused.error.unwrap().contains("another panel"),
+            "refused for the right reason"
+        );
+        assert_eq!(manage::owner(&tunnels, "one"), None);
+        let get: Ack = serde_json::from_slice(
+            &second
+                .handle(Request::TunnelGet { name: "one".into() })
+                .await,
+        )
+        .unwrap();
+        assert!(!get.ok);
+        let delete: Ack = serde_json::from_slice(
+            &first
+                .handle(Request::TunnelDelete { name: "two".into() })
+                .await,
+        )
+        .unwrap();
+        assert!(!delete.ok);
+        assert!(tunnels.join("two.toml").exists());
+        // Its own: removed, with its mark.
+        let delete: Ack = serde_json::from_slice(
+            &second
+                .handle(Request::TunnelDelete { name: "two".into() })
+                .await,
+        )
+        .unwrap();
+        assert!(delete.ok, "{delete:?}");
+        assert!(!tunnels.join("two.toml").exists() && !tunnels.join("two.owner").exists());
+        // A free name again: either panel may take it.
+        assert!(put(&first, "two").await.ok);
+        assert_eq!(names(&first).await, ["one", "two"]);
+        assert!(names(&second).await.is_empty());
     }
 }

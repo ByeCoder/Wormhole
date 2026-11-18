@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.2.4 - 2026-11-18
+
+- **One server in several panels.** A server that is in a panel already can join more:
+  the manager asks whether a new join code adds a panel or replaces the current one, and
+  `wormhole-manager agent add CODE [--name NAME]` adds one (`agent list`, `agent logs NAME`,
+  `agent remove NAME`). Each further panel has an agent of its own
+  (`wormhole-agent@NAME`, settings in `/etc/wormhole-panel/panels/NAME/`) and sees and
+  changes only its own tunnels and private-network links; a name another panel uses on the
+  server is refused. Updates restart every agent on the server. Guide:
+  [Panel](docs/panel.md#one-server-in-several-panels).
+
 ## 1.2.3 - 2026-11-18
 
 - **Fix:** the x86_64 binaries of 1.2.2 stopped at once with *Illegal instruction* on

@@ -35,7 +35,7 @@ impl Launcher for SystemdRun {
         let status = std::process::Command::new("systemd-run")
             .args([
                 "--unit",
-                "wormhole-agent-update",
+                &format!("wormhole-agent-update-{}", std::process::id()),
                 "--collect",
                 "--quiet",
                 "--",
@@ -68,6 +68,8 @@ pub struct AgentUpdate {
     wormhole_bin: PathBuf,
     launcher: Box<dyn Launcher>,
     incoming: Mutex<HashMap<String, Incoming>>,
+    /// The agent's systemd service, which the helper restarts.
+    unit: String,
 }
 
 impl AgentUpdate {
@@ -87,7 +89,15 @@ impl AgentUpdate {
             wormhole_bin,
             launcher,
             incoming: Mutex::new(HashMap::new()),
+            unit: "wormhole-agent".to_owned(),
         }
+    }
+
+    /// The agent's service is not `wormhole-agent` (a further panel's agent).
+    #[must_use]
+    pub fn with_unit(mut self, unit: String) -> Self {
+        self.unit = unit;
+        self
     }
 
     fn version_dir(&self, version: &str) -> Result<PathBuf> {
@@ -242,6 +252,8 @@ impl AgentUpdate {
             self.panel_bin.display().to_string(),
             "--wormhole-bin".to_owned(),
             self.wormhole_bin.display().to_string(),
+            "--unit".to_owned(),
+            self.unit.clone(),
             // The agent still has to answer the panel that the hand-over went well.
             "--delay".to_owned(),
             "3".to_owned(),
@@ -264,11 +276,24 @@ impl Host for AgentHost {
             .args(["restart", &self.unit])
             .status()
             .context("failed to run systemctl")?;
-        if status.success() {
-            Ok(())
-        } else {
+        if !status.success() {
             bail!("systemctl restart {} failed", self.unit)
         }
+        // The other panels' agents on this server run the same program: they start the new
+        // one too (each comes back to its own panel by itself).
+        let others: Vec<String> = ["wormhole-agent.service", "wormhole-agent@*.service"]
+            .iter()
+            .map(|u| (*u).to_owned())
+            .collect();
+        let _ = std::process::Command::new("systemctl")
+            .arg("try-restart")
+            .args(
+                others
+                    .iter()
+                    .filter(|u| u.trim_end_matches(".service") != self.unit),
+            )
+            .status();
+        Ok(())
     }
 
     fn answers(&self, _version: &str) -> bool {

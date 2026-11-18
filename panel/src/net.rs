@@ -529,6 +529,9 @@ pub struct Net {
     lock: tokio::sync::Mutex<()>,
     /// Where the kernel lists the interfaces (`/sys/class/net`).
     sys: PathBuf,
+    /// The saved links of the other panels' agents on this server: their names are not
+    /// this one's to make or remove.
+    others: Vec<PathBuf>,
 }
 
 impl Net {
@@ -542,7 +545,28 @@ impl Net {
             state,
             lock: tokio::sync::Mutex::new(()),
             sys: PathBuf::from("/sys/class/net"),
+            others: Vec::new(),
         }
+    }
+
+    /// The saved-links files of the other agents on this server (see [`Net::others`]).
+    pub fn with_others(mut self, others: Vec<PathBuf>) -> Self {
+        self.others = others;
+        self
+    }
+
+    /// Fails for a link name that another panel's agent on this server keeps.
+    fn not_others(&self, name: &str) -> Result<()> {
+        for path in &self.others {
+            let theirs: State = std::fs::read_to_string(path)
+                .ok()
+                .and_then(|t| toml::from_str(&t).ok())
+                .unwrap_or_default();
+            if theirs.link.iter().any(|l| l.name == name) {
+                bail!("this server has a link named {name} that another panel manages: choose another name");
+            }
+        }
+        Ok(())
     }
 
     /// Like [`Net::with_exec`], with the interfaces looked for in `sys` (for the tests).
@@ -671,6 +695,7 @@ impl Net {
     }
 
     pub async fn up(&self, spec: NetSpec) -> Result<()> {
+        self.not_others(&spec.name)?;
         let _guard = self.lock.lock().await;
         let had = self.load().link.into_iter().find(|l| l.name == spec.name);
         self.make(had.as_ref(), &spec).await?;
@@ -699,6 +724,7 @@ impl Net {
         if !valid_ifname(name) {
             bail!("the interface name must be kz- and up to eight small letters or digits");
         }
+        self.not_others(name)?;
         let _guard = self.lock.lock().await;
         let mut state = self.load();
         state.link.retain(|l| l.name != name);
@@ -726,6 +752,17 @@ impl Net {
             }
         }
         let mut failed = Vec::new();
+        // Another panel's links are left as they are and not saved as this one's.
+        let wanted: Vec<NetSpec> = wanted
+            .into_iter()
+            .filter(|spec| match self.not_others(&spec.name) {
+                Ok(()) => true,
+                Err(e) => {
+                    failed.push(format!("{}: {e:#}", spec.name));
+                    false
+                }
+            })
+            .collect();
         for spec in &wanted {
             let had = state.link.iter().find(|l| l.name == spec.name);
             if had == Some(spec) && self.exists(&spec.name) {
@@ -1618,6 +1655,30 @@ mod tests {
                 0o600
             );
         }
+    }
+
+    /// Two panels on one server: a link name that the other panel's agent keeps is not
+    /// made, removed or taken over, and a sync leaves it out of this agent's list.
+    #[tokio::test]
+    async fn another_panels_link_is_left_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let theirs = dir.path().join("theirs.toml");
+        let fake = Arc::new(Fake::default());
+        let other = Net::with_exec(Some(theirs.clone()), fake.clone());
+        other.keep(spec()).unwrap();
+        let net = Net::with_exec(Some(dir.path().join("net.toml")), fake.clone())
+            .with_others(vec![theirs.clone()]);
+        let up = net.up(spec()).await.unwrap_err().to_string();
+        assert!(up.contains("another panel"), "{up}");
+        assert!(net.down("kz-a1b2c").await.is_err());
+        assert!(net.sync(vec![spec()]).await.is_err());
+        assert!(calls(&fake).is_empty(), "nothing ran: {:?}", calls(&fake));
+        assert!(!std::fs::read_to_string(dir.path().join("net.toml"))
+            .unwrap_or_default()
+            .contains("kz-a1b2c"));
+        // Once the other panel lets it go, it is free.
+        std::fs::remove_file(&theirs).unwrap();
+        net.up(spec()).await.unwrap();
     }
 
     #[tokio::test]

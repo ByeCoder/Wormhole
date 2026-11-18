@@ -134,6 +134,9 @@ enum Command {
         panel_bin: PathBuf,
         #[arg(long)]
         wormhole_bin: PathBuf,
+        /// The agent's service (a further panel's agent is `wormhole-agent@NAME`).
+        #[arg(long, default_value = "wormhole-agent")]
+        unit: String,
         /// Seconds to wait before starting, so the agent can still answer the panel.
         #[arg(long, default_value_t = 0)]
         delay: u64,
@@ -218,10 +221,11 @@ fn main() -> Result<()> {
             stamp,
             panel_bin,
             wormhole_bin,
+            unit,
             delay,
         } => {
             std::thread::sleep(std::time::Duration::from_secs(delay));
-            agent_update_apply(&stage, &version, stamp, panel_bin, wormhole_bin)
+            agent_update_apply(&stage, &version, stamp, panel_bin, wormhole_bin, unit)
         }
         Command::ReleaseKey { out } => release_key(&out),
         Command::ReleaseSign { file, key_env } => release_sign(&file, &key_env),
@@ -326,11 +330,12 @@ fn agent_update_apply(
     stamp: PathBuf,
     panel: PathBuf,
     wormhole: PathBuf,
+    unit: String,
 ) -> Result<()> {
     use wormhole_panel::agent_update::{AgentHost, WAIT};
     use wormhole_panel::update::{self, Targets};
     let host = AgentHost {
-        unit: "wormhole-agent".into(),
+        unit,
         stamp,
         since: std::time::SystemTime::now(),
     };
