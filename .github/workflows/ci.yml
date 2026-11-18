@@ -97,6 +97,34 @@ jobs:
       - name: Library tests under QEMU
         run: cross test --locked --target ${{ matrix.target }} --lib
 
+  # The x86_64 release build, as release.yml makes it, must run on any x86_64 CPU: the
+  # runner's GCC may default to AVX2 for the C parts (1.2.2 crashed on older servers).
+  baseline:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: x86_64-unknown-linux-musl
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: panel/web/package-lock.json
+      - run: npm ci && npm run build
+        working-directory: panel/web
+      - run: sudo apt-get update && sudo apt-get install -y musl-tools qemu-user
+      - name: What the C compiler targets by default
+        run: gcc -Q --help=target | grep -E '^\s+-march=' ; echo | gcc -dM -E - | grep -E '__AVX2__|__SSE4_2__' || echo "no AVX2 or SSE4.2 by default"
+      - run: cargo build --release --locked --target x86_64-unknown-linux-musl -p wormhole -p wormhole-panel
+        env:
+          CFLAGS_x86_64_unknown_linux_musl: -march=x86-64 -mtune=generic
+          RUSTFLAGS: -C target-cpu=x86-64
+      - run: scripts/check-baseline.sh target/x86_64-unknown-linux-musl/release
+
   # scripts/wormhole.sh on a real systemd host: install from a local build, the menu through a
   # terminal, the panel and an agent, signed releases, updating the panel from the panel. The
   # tunnels the agent would make are written by hand here (same files, same units).

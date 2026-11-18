@@ -52,8 +52,16 @@ jobs:
         working-directory: panel/web
       - if: ${{ !matrix.cross }}
         run: sudo apt-get update && sudo apt-get install -y musl-tools
+      # The C parts (mimalloc, SQLite) are built by the runner's GCC, whose default can be a
+      # newer x86-64 level (AVX2): pin the baseline so the binaries run on any x86_64 CPU.
       - if: ${{ !matrix.cross }}
         run: cargo build --release --locked --target ${{ matrix.target }} -p wormhole -p wormhole-panel
+        env:
+          CFLAGS_x86_64_unknown_linux_musl: -march=x86-64 -mtune=generic
+          RUSTFLAGS: -C target-cpu=x86-64
+      # And check it on an emulated CPU of that level.
+      - if: ${{ matrix.arch == 'x86_64' }}
+        run: scripts/check-baseline.sh target/${{ matrix.target }}/release
       - if: ${{ matrix.cross }}
         uses: taiki-e/install-action@v2
         with:
