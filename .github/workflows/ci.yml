@@ -225,7 +225,7 @@ jobs:
             sed -n 's/.*"code":"\([^"]*\)".*/\1/p')
           sudo WORMHOLE_NO_UPDATE_CHECK=1 wormhole-manager agent add "$code2" --name second
           systemctl is-active --quiet wormhole-agent wormhole-agent@second
-          test -f /etc/wormhole-panel/panels/second/agent.toml
+          sudo test -f /etc/wormhole-panel/panels/second/agent.toml
           for _ in $(seq 1 30); do
             curl -sk -b jar "${base}api/servers" > servers.json
             jq -e '[.servers[] | select((.name == "ci-agent" or .name == "ci-agent-2") and .online)] | length == 2' servers.json >/dev/null && break
@@ -241,7 +241,7 @@ jobs:
           echo "$out" | grep -q "Restarted wormhole-agent@second"
           # removing it leaves the first agent
           sudo wormhole-manager agent remove second
-          test ! -e /etc/wormhole-panel/panels/second
+          sudo test ! -e /etc/wormhole-panel/panels/second
           ! systemctl is-active --quiet wormhole-agent@second
           systemctl is-active --quiet wormhole-agent
       # The manager checks release signatures with openssl and the key in the script; here a
