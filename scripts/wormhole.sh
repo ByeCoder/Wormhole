@@ -17,6 +17,8 @@
 #   wormhole-manager --agent CODE [--yes]   connect this server to a panel (its join code); a
 #                                        server that is connected already is switched to it
 #   wormhole-manager agent status | logs | remove
+#   wormhole-manager agent add CODE [--name NAME]   connect to one more panel, keeping the others
+#   wormhole-manager agent list | logs NAME | remove NAME
 #   wormhole-manager status              what runs here, and this server's addresses
 #
 # If GitHub limits your downloads, set GITHUB_TOKEN to a personal access token: it lifts the limit.
@@ -39,6 +41,10 @@ PANEL_DOMAIN=$PANEL_DIR/domain
 ACME_STOPPED=/run/wormhole-acme-stopped
 PANEL_UNIT=/etc/systemd/system/wormhole-panel.service
 AGENT_UNIT=/etc/systemd/system/wormhole-agent.service
+# The agents of further panels this server is joined to: panels/NAME/agent.toml, each with
+# its own service wormhole-agent@NAME.
+PANELS_DIR=$PANEL_DIR/panels
+AGENT_TEMPLATE=/etc/systemd/system/wormhole-agent@.service
 # What gives the panel a certificate for the server's new IP address by itself (`panel heal`),
 # and the address it last failed to get one for, with when.
 HEAL_SERVICE=/etc/systemd/system/wormhole-panel-heal.service
@@ -560,6 +566,23 @@ PrivateTmp=true
 [Install]
 WantedBy=multi-user.target
 EOF
+    cat >"$AGENT_TEMPLATE" <<'EOF'
+[Unit]
+Description=Wormhole agent for the panel %i (one more panel this server is connected to)
+Documentation=https://github.com/ByeCoder/Wormhole
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/wormhole-panel agent -c /etc/wormhole-panel/panels/%i/agent.toml
+Restart=always
+RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
+EOF
     systemctl daemon-reload
 }
 
@@ -763,7 +786,8 @@ cmd_update() {
     done
     ok "$before -> $("$BIN" --version); $restarted running tunnel(s) restarted"
     local svc
-    for svc in wormhole-panel wormhole-agent; do
+    # The agents of further panels run the same program.
+    for svc in wormhole-panel wormhole-agent $(extra_agents | sed 's/^/wormhole-agent@/'); do
         if systemctl is-active --quiet "$svc"; then
             systemctl restart "$svc"
             info "Restarted $svc."
@@ -782,14 +806,61 @@ remove_net_links() {
     return 0
 }
 
+# Removes the private network links one agent saved (its net.toml), and only those: the
+# other panels' links on this server stay.
+remove_saved_links() {
+    local file=$1 link
+    command -v ip >/dev/null && [[ -f "$file" ]] || return 0
+    for link in $(sed -n 's/^name = "\(kz-[a-z0-9]*\)"$/\1/p' "$file"); do
+        ip link del "$link" 2>/dev/null && info "Removed the private network link $link."
+    done
+    return 0
+}
+
+# The further panels this server is connected to: their names, one per line.
+extra_agents() {
+    local dir
+    for dir in "$PANELS_DIR"/*/; do
+        [[ -f "$dir/agent.toml" ]] && basename "$dir"
+    done
+    return 0
+}
+
+# Removes one further panel's agent: its service, settings and the links it made. Its
+# tunnels keep running (they are removed in that panel, or with the tunnels of the server).
+agent_remove_extra() {
+    local name=$1
+    [[ -f "$PANELS_DIR/$name/agent.toml" ]] || die "This server has no agent for a panel named $name (wormhole-manager agent list)."
+    systemctl disable --now "wormhole-agent@$name" 2>/dev/null || true
+    remove_saved_links "$PANELS_DIR/$name/net.toml"
+    rm -rf "${PANELS_DIR:?}/$name"
+}
+
 # Removes the agent completely: its service, settings and identity, what it remembers, the
 # update files, and the private network links it made.
 agent_remove() {
     systemctl disable --now wormhole-agent 2>/dev/null || true
-    rm -f "$AGENT_UNIT" "$AGENT_CONF" "$PANEL_DIR/link-transport" "$PANEL_DIR/net.toml" "$PANEL_DIR/connected"
+    if [[ -n "$(extra_agents)" ]]; then
+        # Other panels' agents stay: only this one's links go, and the template stays.
+        remove_saved_links "$PANEL_DIR/net.toml"
+        rm -f "$AGENT_UNIT" "$AGENT_CONF" "$PANEL_DIR/link-transport" "$PANEL_DIR/net.toml" "$PANEL_DIR/connected"
+        systemctl daemon-reload
+        return 0
+    fi
+    rm -f "$AGENT_UNIT" "$AGENT_TEMPLATE" "$AGENT_CONF" "$PANEL_DIR/link-transport" "$PANEL_DIR/net.toml" "$PANEL_DIR/connected"
     rm -rf "$PANEL_DIR/updates"
     systemctl daemon-reload
     remove_net_links
+}
+
+# Removes every agent: the first panel's and all the further ones (uninstall).
+agent_remove_all() {
+    local name
+    for name in $(extra_agents); do
+        agent_remove_extra "$name"
+    done
+    rm -rf "$PANELS_DIR"
+    agent_remove
 }
 
 # Removes Wormhole from this server completely: the tunnels, the agent, the web panel and the
@@ -816,8 +887,8 @@ cmd_uninstall() {
         systemctl disable --now "$unit" 2>/dev/null || true
     done
     rm -f "$UNIT" "$BIN"
-    if has_agent || [[ -f "$AGENT_UNIT" ]]; then
-        agent_remove
+    if has_agent || [[ -f "$AGENT_UNIT" ]] || [[ -n "$(extra_agents)" ]]; then
+        agent_remove_all
         ok "The agent is removed."
     fi
     if [[ -f "$PANEL_UNIT" || -f "$PANEL_CONF" ]]; then
@@ -1875,6 +1946,19 @@ agent_join() {
         esac
     done
     [[ "$code" == kz1_* ]] || die "That is not a join code (it starts with kz1_). Copy it whole from the panel: Servers, Add server."
+    if has_agent && ((!yes)) && ui_interactive; then
+        echo
+        warn "This server already has a Wormhole agent (it is connected to a panel)."
+        local how
+        choose how "What should the new code do?" add \
+            "add|connect to this panel too: the server stays in its current panel(s) as well" \
+            "replace|switch to this panel: the current agent is removed"
+        if [[ "$how" == add ]]; then
+            agent_add "$code" "${version[@]}"
+            return
+        fi
+        yes=1
+    fi
     if has_agent; then
         echo
         warn "This server already has a Wormhole agent (it is connected to a panel)."
@@ -1920,22 +2004,116 @@ agent_join() {
     info "Follow it with: wormhole-manager agent logs"
 }
 
+# A free name for one more panel's agent: panel2, panel3, …
+next_panel_name() {
+    local n=2
+    while [[ -e "$PANELS_DIR/panel$n" ]]; do n=$((n + 1)); done
+    echo "panel$n"
+}
+
+# Connects this server to one more panel, keeping the panels it is connected to already:
+# `wormhole-manager agent add CODE [--name NAME]`. Each panel gets an agent of its own (its
+# own service, wormhole-agent@NAME) and sees only the tunnels and links it made itself.
+agent_add() {
+    need_root
+    need_systemd
+    local code=${1:-} name="" version=()
+    shift || true
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --name) name=$2 && shift 2 ;;
+            --version) version=(--version "$2") && shift 2 ;;
+            --yes | -y) shift ;;
+            *) die "agent add: unknown option $1" ;;
+        esac
+    done
+    [[ "$code" == kz1_* ]] || die "That is not a join code (it starts with kz1_). Copy it whole from the panel: Servers, Add server."
+    has_agent || {
+        # The first panel is the plain agent.
+        agent_join "$code" "${version[@]}"
+        return
+    }
+    [[ -n "$name" ]] || name=$(next_panel_name)
+    [[ "$name" =~ ^[a-z0-9][a-z0-9-]{0,31}$ ]] ||
+        die "A panel name is 1 to 32 small letters, digits and dashes (not starting with a dash)."
+    [[ ! -e "$PANELS_DIR/$name" ]] || die "There is a panel named $name here already: pick another --name, or remove it first."
+    if [[ ! -x "$PANEL_BIN" ]]; then
+        cmd_install "${version[@]}"
+    elif ((${#version[@]} == 0)) && update_available; then
+        warn "Wormhole $LATEST is out, and this server has an older one ($BEHIND): updating it first."
+        cmd_install
+    fi
+    mkdir -p "$PANELS_DIR/$name"
+    chmod 700 "$PANEL_DIR" "$PANELS_DIR" "$PANELS_DIR/$name"
+    "$PANEL_BIN" agent --join "$code" --no-run -c "$PANELS_DIR/$name/agent.toml" || {
+        rm -rf "${PANELS_DIR:?}/$name"
+        die "The join code was not accepted."
+    }
+    install_panel_units
+    systemctl enable "wormhole-agent@$name" >/dev/null 2>&1
+    systemctl restart "wormhole-agent@$name"
+    sleep 2
+    systemctl is-active --quiet "wormhole-agent@$name" ||
+        die "The agent did not start: journalctl -u wormhole-agent@$name -n 50"
+    local listen
+    listen=$(sed -n 's/^listen = "\(.*\)"$/\1/p' "$PANELS_DIR/$name/agent.toml" | head -n 1)
+    if [[ -n "$listen" ]]; then
+        local lport=${listen##*:}
+        ok "This server is ready for the panel $name: its agent waits for it on port $lport."
+        info "Open TCP and UDP $lport and $((lport + 1)) to that panel's address."
+    else
+        ok "This server is connected to one more panel ($name): it shows up there under Servers."
+    fi
+    info "Each panel sees only the tunnels it made. Follow it with: wormhole-manager agent logs $name"
+}
+
+# The panels this server is connected to.
+agent_list() {
+    local name state
+    if has_agent; then
+        state=$(systemctl is-active wormhole-agent 2>/dev/null || true)
+        info "first panel   wormhole-agent   ${state:-unknown}   $(sed -n 's/^panel = "\(.*\)"$/\1/p' "$AGENT_CONF" 2>/dev/null)"
+    fi
+    for name in $(extra_agents); do
+        state=$(systemctl is-active "wormhole-agent@$name" 2>/dev/null || true)
+        info "$name   wormhole-agent@$name   ${state:-unknown}   $(sed -n 's/^panel = "\(.*\)"$/\1/p' "$PANELS_DIR/$name/agent.toml" 2>/dev/null)"
+    done
+    has_agent || [[ -n "$(extra_agents)" ]] || info "This server is not connected to a panel."
+}
+
 cmd_agent() {
     local action=${1:-}
     case $action in
         kz1_*) agent_join "$@" ;;
         join) shift && agent_join "$@" ;;
+        add) shift && agent_add "$@" ;;
+        list) agent_list ;;
         status)
             need_systemd
-            systemctl status wormhole-agent --no-pager
+            if [[ -n "${2:-}" ]]; then
+                systemctl status "wormhole-agent@$2" --no-pager
+            else
+                systemctl status wormhole-agent --no-pager
+            fi
             ;;
-        logs) journalctl -u wormhole-agent -n 100 -f ;;
+        logs)
+            if [[ -n "${2:-}" ]]; then
+                journalctl -u "wormhole-agent@$2" -n 100 -f
+            else
+                journalctl -u wormhole-agent -n 100 -f
+            fi
+            ;;
         remove)
             need_root
-            agent_remove
-            ok "The agent is removed. Remove the server in the panel too (Servers, Remove). Its tunnels keep running."
+            if [[ -n "${2:-}" ]]; then
+                agent_remove_extra "$2"
+                ok "The agent for the panel $2 is removed. Remove the server in that panel too. Its tunnels keep running."
+            else
+                agent_remove
+                ok "The agent is removed. Remove the server in the panel too (Servers, Remove). Its tunnels keep running."
+            fi
             ;;
-        *) die "agent: CODE | join CODE | status | logs | remove" ;;
+        *) die "agent: CODE | join CODE | add CODE [--name N] | list | status [N] | logs [N] | remove [N]" ;;
     esac
 }
 
@@ -2005,7 +2183,7 @@ MENU_ROWS=(
     "premove|8|Remove the web panel|Stop and remove the panel. Asks first."
     ""
     "#AGENT"
-    "agent|9|Connect to a panel|Paste a panel's join code: this server then shows up in that panel."
+    "agent|9|Connect to a panel|Paste a panel's join code: this server shows up in that panel. Already connected: add it or switch."
     "aremove|10|Remove the agent|Disconnect from the panel; its tunnels keep running. Asks first."
     ""
     "#SYSTEM"
@@ -2396,12 +2574,24 @@ screen_agent() {
 }
 
 screen_agent_remove() {
-    has_agent || {
+    local extras which rows=() name
+    extras=$(extra_agents)
+    has_agent || [[ -n "$extras" ]] || {
         warn "This server has no agent."
         return 0
     }
-    confirm "Disconnect this server from its panel? (its tunnels keep running)" || return 0
-    cmd_agent remove
+    if [[ -z "$extras" ]]; then
+        confirm "Disconnect this server from its panel? (its tunnels keep running)" || return 0
+        cmd_agent remove
+        return
+    fi
+    has_agent && rows+=("first|the first panel ($(sed -n 's/^panel = "\(.*\)"$/\1/p' "$AGENT_CONF" 2>/dev/null))")
+    for name in $extras; do
+        rows+=("$name|$name ($(sed -n 's/^panel = "\(.*\)"$/\1/p' "$PANELS_DIR/$name/agent.toml" 2>/dev/null))")
+    done
+    choose which "Disconnect from which panel?" "${rows[0]%%|*}" "${rows[@]}"
+    confirm "Disconnect this server from that panel? (its tunnels keep running)" || return 0
+    if [[ "$which" == first ]]; then cmd_agent remove; else cmd_agent remove "$which"; fi
 }
 
 screen_logs() {
@@ -2486,6 +2676,9 @@ usage() {
   --agent CODE [--version V] [--yes]           connect this server to a panel (an agent that is
                                                here already is replaced by the new one)
   agent status | logs | remove
+  agent add CODE [--name NAME]                 connect to one more panel as well (each panel sees
+                                               only the tunnels it made)
+  agent list | status NAME | logs NAME | remove NAME
   status                                       what runs here, and this server's addresses
   tunnel-cert --domain D | --ip A [--email E]  a Let's Encrypt certificate for a wss tunnel (the
                                                panel runs this on the server the tunnel listens on)

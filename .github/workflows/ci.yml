@@ -218,10 +218,32 @@ jobs:
           grep -Eq '"mem_total":[0-9]+' servers.json
           # a login link works once
           curl -sk -H 'Content-Type: application/json' -d "{\"token\":\"$token\"}" "${base}api/link" | grep -q wrong
-          # the update restarts the panel and the agent
+          # one more panel, keeping the first: an agent of its own (here the same panel plays
+          # the second one, under another server name)
+          code2=$(curl -sk -b jar -H "X-Wormhole-CSRF: $csrf" -H 'Content-Type: application/json' \
+            -d '{"name":"ci-agent-2","host":"127.0.0.1"}' "${base}api/servers/join-code" |
+            sed -n 's/.*"code":"\([^"]*\)".*/\1/p')
+          sudo WORMHOLE_NO_UPDATE_CHECK=1 wormhole-manager agent add "$code2" --name second
+          systemctl is-active --quiet wormhole-agent wormhole-agent@second
+          test -f /etc/wormhole-panel/panels/second/agent.toml
+          for _ in $(seq 1 30); do
+            curl -sk -b jar "${base}api/servers" > servers.json
+            jq -e '[.servers[] | select((.name == "ci-agent" or .name == "ci-agent-2") and .online)] | length == 2' servers.json >/dev/null && break
+            sleep 1
+          done
+          jq -e '[.servers[] | select((.name == "ci-agent" or .name == "ci-agent-2") and .online)] | length == 2' servers.json >/dev/null
+          sudo wormhole-manager agent list | tee agents.txt
+          grep -q second agents.txt
+          # the update restarts the panel and the agents
           out=$(sudo wormhole-manager update --binary target/release/wormhole --panel-binary target/release/wormhole-panel)
           echo "$out" | grep -q "Restarted wormhole-panel"
-          echo "$out" | grep -q "Restarted wormhole-agent"
+          echo "$out" | grep -q "Restarted wormhole-agent\."
+          echo "$out" | grep -q "Restarted wormhole-agent@second"
+          # removing it leaves the first agent
+          sudo wormhole-manager agent remove second
+          test ! -e /etc/wormhole-panel/panels/second
+          ! systemctl is-active --quiet wormhole-agent@second
+          systemctl is-active --quiet wormhole-agent
       # The manager checks release signatures with openssl and the key in the script; here a
       # key made for the test is pinned, since only the release workflow has the real one.
       - name: Release signatures

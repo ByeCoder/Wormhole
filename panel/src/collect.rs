@@ -325,6 +325,14 @@ pub fn parse_routes(text: &str) -> Vec<String> {
 
 // ---- tunnels ----
 
+/// The tunnels in `dir` that belong to the agent `me` (`None`: the first panel's; see
+/// [`crate::manage::owner`]).
+pub async fn tunnels_of(dir: &Path, services: &dyn Services, me: Option<&str>) -> Vec<TunnelInfo> {
+    let mut all = tunnels(dir, services).await;
+    all.retain(|t| crate::manage::owner(dir, &t.name).as_deref() == me);
+    all
+}
+
 /// The tunnels configured in `dir` (`/etc/wormhole`), with their state. Slow parts (systemd,
 /// the control sockets) are asked with short time limits, so a stuck daemon does not
 /// stall the report.

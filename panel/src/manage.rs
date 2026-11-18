@@ -34,6 +34,42 @@ fn config_path(dir: &Path, name: &str) -> Result<PathBuf> {
     Ok(dir.join(format!("{name}.toml")))
 }
 
+// ---- tunnels of more than one panel ----
+
+/// Which panel a tunnel belongs to, on a server joined to more than one: `NAME.owner` beside
+/// its config holds the name of the extra panel's agent; without it, it is the first
+/// panel's (and that of a panel on this server). Each panel sees and touches only its own.
+pub fn owner(dir: &Path, name: &str) -> Option<String> {
+    let path = config_path(dir, name).ok()?.with_extension("owner");
+    let text = std::fs::read_to_string(path).ok()?;
+    let text = text.trim();
+    (!text.is_empty()).then(|| text.to_owned())
+}
+
+/// Whether the agent named `me` (`None`: the first panel's) may use the name: a tunnel by
+/// that name, if there is one, must be its own.
+pub fn mine(dir: &Path, name: &str, me: Option<&str>) -> Result<()> {
+    let path = config_path(dir, name)?;
+    if path.exists() && owner(dir, name).as_deref() != me {
+        bail!(
+            "this server has a tunnel named {name} that another panel manages: choose another name"
+        );
+    }
+    Ok(())
+}
+
+/// Marks the tunnel as the agent's `me` (or, for the first panel, as nobody else's).
+pub fn claim(dir: &Path, name: &str, me: Option<&str>) -> Result<()> {
+    let path = config_path(dir, name)?.with_extension("owner");
+    match me {
+        Some(me) => crate::agent::write_private(&path, format!("{me}\n").as_bytes()),
+        None => match std::fs::remove_file(&path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.into()),
+            _ => Ok(()),
+        },
+    }
+}
+
 /// The token a config already holds.
 fn existing_token(path: &Path) -> Option<String> {
     let value: toml::Value = toml::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
@@ -700,6 +736,7 @@ pub fn remove_files(dir: &Path, name: &str) -> Result<()> {
         path.with_extension("sock"),
         path.with_extension("crt"),
         path.with_extension("key"),
+        path.with_extension("owner"),
     ] {
         match std::fs::remove_file(&p) {
             Ok(()) => {}

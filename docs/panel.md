@@ -184,6 +184,28 @@ panel dials a server across cannot be removed until the server is moved off it. 
 and `kind` in `POST /api/servers/join-gre` (`gre` or `vxlan`; without a network, the first one of
 that kind, or a new one).
 
+### One server in several panels
+
+A panel takes as many servers as you like, and a server can be in more than one panel too.
+On a server that is connected to a panel already, run the manager with the other panel's
+join code and pick *connect to this panel too* (or, as a command, `agent add`):
+
+```bash
+wormhole-manager agent add kz1_... --name office   # the name is optional: panel2, panel3, …
+wormhole-manager agent list                         # the panels this server is in
+wormhole-manager agent logs office
+wormhole-manager agent remove office                # leave that panel; the others stay
+```
+
+Each further panel gets an agent of its own (`wormhole-agent@NAME`, its settings in
+`/etc/wormhole-panel/panels/NAME/`), and each panel sees and changes only what it made:
+its tunnels (a tunnel of another panel is marked by `NAME.owner` beside its config in
+`/etc/wormhole`) and its private-network links. A tunnel or link name that another panel
+uses on the server is refused: pick another name. Ports are shared, so the panels' port
+checks see each other's tunnels. An update from any panel (or `wormhole-manager update`)
+restarts every agent on the server. `--agent CODE --yes` still replaces the first panel's
+agent, as before.
+
 ### A server that goes offline
 
 The agent's link to the panel and the tunnels are separate things: when a server shows

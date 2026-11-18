@@ -2076,7 +2076,7 @@ impl Hub {
             }
             round = round.wrapping_add(1);
             let health = sampler.sample();
-            let tunnels = collect::tunnels(&self.wormhole_dir, &*self.services).await;
+            let tunnels = collect::tunnels_of(&self.wormhole_dir, &*self.services, None).await;
             {
                 let mut live = self.live();
                 let entry = live.entry(LOCAL.to_owned()).or_default();
