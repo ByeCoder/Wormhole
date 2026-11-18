@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.2.3 - 2026-11-18
+
+- **Fix:** the x86_64 binaries of 1.2.2 stopped at once with *Illegal instruction* on
+  servers whose CPU has no AVX2 (older or some virtual CPUs): the release runner's C
+  compiler built mimalloc and SQLite for a newer x86-64 level. The release now pins the
+  baseline (`-march=x86-64`), and CI and the release check that both programs start on an
+  emulated CPU of the first x86-64 level (`scripts/check-baseline.sh`).
+
 ## 1.2.2 - 2026-11-16
 
 - **A tunnel's transports side by side.** The page of an `auto` or `multi` tunnel has a
