@@ -16,7 +16,7 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use serde::Deserialize;
 
 use crate::proto::Duplicate;
@@ -243,6 +243,9 @@ pub struct TunnelConfig {
     pub shadowtls: Option<ShadowtlsConfig>,
     /// Only for `multi`: the transports it runs at once, and their ports.
     pub multi: Option<MultiConfig>,
+    /// Only for `dns`: the resolver path (a domain, and the resolvers the dialing side
+    /// sends its queries to).
+    pub dns: Option<DnsConfig>,
     /// The exit side answers speed test streams (`wormhole speedtest` on the entry side).
     /// They only produce, consume and echo data; they dial nothing.
     #[serde(default = "default_true")]
@@ -286,6 +289,45 @@ pub struct ShadowtlsConfig {
     /// `www.microsoft.com:443`. The listener relays probes here; the dialer uses `host` as
     /// its SNI base.
     pub handshake: String,
+}
+
+/// `[tunnel.dns]`: `transport = "dns"` through real recursive resolvers. Without it, `dns`
+/// goes straight to the other server, only looking like DNS.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DnsConfig {
+    /// The domain delegated to the listening side (an NS record pointing at it), e.g.
+    /// `t.example.com`. Both sides set the same one: the listener answers for it as its
+    /// authoritative server, the dialer puts its data in names under it.
+    pub domain: String,
+    /// The dialing side: the resolvers to send queries to, `IP` or `IP:port` (53 if left
+    /// off). Spread over by how well each answers; one that stops is left out for a while.
+    #[serde(default)]
+    pub resolvers: Vec<String>,
+    /// The dialing side: how many different resolvers each packet is sent through (1–4;
+    /// 2 by default, never more than there are resolvers). Resolver paths often lose
+    /// queries, and a copy through another resolver saves the wait for KCP's resend.
+    #[serde(default = "default_duplicate")]
+    pub duplicate: u8,
+}
+
+fn default_duplicate() -> u8 {
+    2
+}
+
+impl DnsConfig {
+    /// The resolvers as addresses.
+    pub fn resolver_addrs(&self) -> Result<Vec<std::net::SocketAddr>> {
+        self.resolvers
+            .iter()
+            .map(|r| {
+                let r = r.trim();
+                r.parse::<std::net::SocketAddr>()
+                    .or_else(|_| r.parse::<std::net::IpAddr>().map(|ip| (ip, 53).into()))
+                    .map_err(|_| anyhow!("[tunnel.dns] resolvers: {r:?} is not an IP or IP:port"))
+            })
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1039,6 +1081,11 @@ const ICMP_MTU_FEC: usize = 1429;
 const DNS_MTU: usize = 1136;
 /// With FEC, 43 bytes are added instead of 30: 1136 - 13 = 1123.
 const DNS_MTU_FEC: usize = 1123;
+/// Through resolvers (`[tunnel.dns]`), a sealed packet must fit one TXT answer within the
+/// 1232-byte EDNS0 buffer after a question of the longest name: 931 bytes, so 903 of KCP.
+const RESOLVER_MTU_MAX: usize = 903;
+/// The default there: smaller, so a packet the dialing side sends takes fewer queries.
+const RESOLVER_MTU: usize = 600;
 const KCP_FEC_DATA: std::ops::RangeInclusive<usize> = 1..=64;
 const KCP_FEC_PARITY: std::ops::RangeInclusive<usize> = 1..=32;
 const MUX_MIN_LIFETIME_SECS: u64 = 60;
@@ -1256,6 +1303,7 @@ impl Config {
                  feature)"
             );
         }
+        self.validate_dns()?;
         if self.tunnel.transport == TransportKind::Shadowtls {
             if !cfg!(feature = "shadowtls") {
                 bail!(
@@ -1557,7 +1605,17 @@ impl Config {
                 );
             }
         }
-        if self.tunnel.transport == TransportKind::Dns {
+        if self.tunnel.transport == TransportKind::Dns && self.dns_resolver_path() {
+            let effective = self.kcp();
+            let fec = if effective.fec().is_some() { 13 } else { 0 };
+            let max = RESOLVER_MTU_MAX - fec;
+            if effective.mtu > max {
+                bail!(
+                    "tunnel.kcp.mtu must be at most {max} bytes with [tunnel.dns] (each packet \
+                     must fit one DNS answer through a resolver)"
+                );
+            }
+        } else if self.tunnel.transport == TransportKind::Dns {
             let effective = self.kcp();
             let max = if effective.fec().is_some() {
                 DNS_MTU_FEC
@@ -1575,6 +1633,52 @@ impl Config {
         Ok(())
     }
 
+    /// Whether `dns` goes through resolvers (`[tunnel.dns]`).
+    pub fn dns_resolver_path(&self) -> bool {
+        self.tunnel.dns.is_some()
+    }
+
+    fn validate_dns(&self) -> Result<()> {
+        let Some(d) = &self.tunnel.dns else {
+            return Ok(());
+        };
+        if self.tunnel.transport != TransportKind::Dns {
+            bail!("[tunnel.dns] is only used with transport = \"dns\"");
+        }
+        let domain = crate::transport::dns::wire::Domain::parse(&d.domain)
+            .map_err(|e| anyhow!("[tunnel.dns] domain: {e}"))?;
+        // A packet goes up in at most 15 query names: a long domain leaves less room.
+        let kcp = self.kcp();
+        let extra = 28 + if kcp.fec().is_some() { 13 } else { 0 };
+        let most = domain.fragment_capacity() * crate::transport::dns::wire::MAX_FRAGMENTS;
+        if kcp.mtu + extra > most {
+            bail!(
+                "[tunnel.dns] domain {:?} leaves room for packets of {} bytes at most: use a \
+                 shorter domain or a smaller tunnel.kcp.mtu",
+                d.domain,
+                most.saturating_sub(extra)
+            );
+        }
+        let resolvers = d.resolver_addrs()?;
+        if self.is_acceptor() {
+            if !resolvers.is_empty() {
+                bail!(
+                    "[tunnel.dns] resolvers are for the dialing side; this side listens as the \
+                     domain's server"
+                );
+            }
+        } else if resolvers.is_empty() {
+            bail!(
+                "[tunnel.dns] needs resolvers on the dialing side, e.g. resolvers = [\"8.8.8.8\", \
+                 \"1.1.1.1\"]"
+            );
+        }
+        if !(1..=4).contains(&d.duplicate) {
+            bail!("[tunnel.dns] duplicate must be 1 to 4");
+        }
+        Ok(())
+    }
+
     /// `[tunnel.kcp]` with the profile's defaults filled in: the gaming profile turns FEC
     /// on (10 data + 3 parity packets per group) unless the table sets `fec_data` or
     /// `fec_parity`, or an MTU too large for FEC.
@@ -1584,7 +1688,11 @@ impl Config {
         // default mtu to its cap when the user has not chosen one of their own (an explicit
         // mtu over the cap is reported by validation instead).
         if self.tunnel.transport == TransportKind::Dns && k.mtu == default_kcp_mtu() {
-            k.mtu = DNS_MTU;
+            k.mtu = if self.dns_resolver_path() {
+                RESOLVER_MTU
+            } else {
+                DNS_MTU
+            };
         }
         let unset = k.fec_data.is_none() && k.fec_parity.is_none();
         if self.profile == Profile::Gaming && unset && k.mtu <= KCP_MTU_FEC {
@@ -2879,6 +2987,41 @@ keepalive_secs = 1
                 (TransportKind::Ws, "0.0.0.0:80".to_owned()),
             ]
         );
+    }
+
+    #[test]
+    fn dns_through_resolvers_takes_a_domain_and_resolvers_on_the_dialing_side() {
+        let dialer = "[tunnel.dns]\ndomain = \"t.example.com\"\nresolvers = [\"8.8.8.8\", \"1.1.1.1:5353\", \"2001:4860:4860::8888\"]";
+        let c = Config::parse(&with_transport("entry", "dns", dialer)).unwrap();
+        assert!(c.dns_resolver_path());
+        let d = c.tunnel.dns.as_ref().unwrap();
+        assert_eq!(d.duplicate, 2);
+        let addrs = d.resolver_addrs().unwrap();
+        assert_eq!(addrs[0], "8.8.8.8:53".parse().unwrap());
+        assert_eq!(addrs[1].port(), 5353);
+        assert!(addrs[2].is_ipv6());
+        // A packet must fit an answer: the smaller default MTU, and a cap.
+        assert_eq!(c.kcp().mtu, RESOLVER_MTU);
+        let listener = "[tunnel.dns]\ndomain = \"t.example.com\"";
+        Config::parse(&with_transport("exit", "dns", listener)).unwrap();
+        for (role, extra, wanted) in [
+            ("entry", "[tunnel.dns]\ndomain = \"t.example.com\"", "needs resolvers"),
+            ("exit", dialer, "for the dialing side"),
+            ("entry", "[tunnel.dns]\ndomain = \"bad_name.com\"\nresolvers = [\"8.8.8.8\"]", "domain"),
+            ("entry", "[tunnel.dns]\ndomain = \"t.example.com\"\nresolvers = [\"dns.google\"]", "not an IP"),
+            ("entry", "[tunnel.dns]\ndomain = \"t.example.com\"\nresolvers = [\"8.8.8.8\"]\nduplicate = 9", "duplicate"),
+            ("entry", "[tunnel.dns]\ndomain = \"t.example.com\"\nresolvers = [\"8.8.8.8\"]\n\n[tunnel.kcp]\nmtu = 1000", "at most 903"),
+        ] {
+            let e = parse_err(&with_transport(role, "dns", extra));
+            assert!(e.contains(wanted), "{extra}: {e}");
+        }
+        let long = format!(
+            "[tunnel.dns]\ndomain = \"{}.example.com\"\nresolvers = [\"8.8.8.8\"]",
+            "a.".repeat(90).trim_end_matches('.')
+        );
+        assert!(parse_err(&with_transport("entry", "dns", &long)).contains("shorter domain"));
+        let e = parse_err(&with_transport("entry", "tcp", dialer));
+        assert!(e.contains("only used with transport = \"dns\""), "{e}");
     }
 
     #[test]

@@ -11,6 +11,8 @@ import { MuxFields, MuxToggle, SpreadToggle, emptyMux, muxSpecOf, muxToSpec } fr
 import { TlsChoice, emptyTls, tlsReady } from "./TlsChoice";
 import { EncryptionChoice, cipherOf, cipherReady } from "./EncryptionChoice";
 import { QuicObfs, obfsOf } from "./QuicObfs";
+import { DnsResolvers, NO_DNS_PATH, dnsFields, dnsProblem } from "./DnsResolvers";
+import type { DnsPath } from "./DnsResolvers";
 import { DEFAULT_MEMBERS, MultiPicker, membersReady } from "./MultiPicker";
 import { KcpFields, emptyKcp, kcpSpecOf, kcpToSpec } from "./PaqetFields";
 import { SpoofFields, emptySpoof, spoofToPair } from "./SpoofFields";
@@ -95,6 +97,16 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
   // A multi tunnel's transports, in port order.
   const [members, setMembers] = useState<string[]>(DEFAULT_MEMBERS);
   const multi = transport === "multi";
+  // dns through real resolvers ([tunnel.dns]): the listening side then answers on port 53.
+  const [dnsPath, setDnsPathState] = useState<DnsPath>(NO_DNS_PATH);
+  // Resolvers ask on port 53: turning the path on moves a dns tunnel there.
+  const setDnsPath = (v: DnsPath) => {
+    if (v.on && !dnsPath.on && transport === "dns") {
+      setPortTouched(true);
+      setListenPort("53");
+    }
+    setDnsPathState(v);
+  };
   // Whether the tunnel runs `x`: as its transport, or as one of a multi tunnel's.
   const has = (x: string) => runsTransport(transport, members, x);
   const [muxOn, setMuxOn] = useState(true);
@@ -252,6 +264,7 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
     tls_host: has("wss") && tls.mode !== "self" && tls.cert && tls.host ? tls.host.toLowerCase() : undefined,
     forwards: parsed.forwards,
     multi: multi ? members : undefined,
+    ...(has("dns") ? dnsFields(dnsPath) : {}),
   });
 
   const problem = (s: number): string => {
@@ -270,6 +283,7 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
       if (has("wss") && !tlsReady(tls)) return t(tls.mode === "own" ? "tls.needOwn" : "tls.needCert");
     }
     if (s === 1 && multi && !membersReady(members)) return t("wz.multi.need2");
+    if (s === 1 && has("dns") && dnsProblem(dnsPath)) return t(dnsProblem(dnsPath)!);
     if (s === 1 && !cipherReady(enc, transport, encAck)) return t("enc.needAck");
     if (s === 1 && muxToSpec(mux).bad) return t(`mux.${muxToSpec(mux).bad}`) + ": " + t("mux.badValue");
     if (s === 1 && transport === "paqet") {
@@ -471,6 +485,7 @@ export function Wizard({ servers, onClose }: { servers: ServerInfo[]; onClose: (
                   <Choice label={t("wz.modeLabel")} value={mode} options={[["reverse", t("wz.mode.reverse")], ["direct", t("wz.mode.direct")]]} onChange={setMode} hint={t(`wz.mode.${mode}.d`)} />
                   <Choice label={t("wz.transport")} mono value={transport} options={TRANSPORTS.map((x) => [x, x])} onChange={setTransport} hint={t(`wz.tr.${transport}`)} />
                   {multi && <MultiPicker value={members} onChange={setMembers} />}
+                  {has("dns") && <DnsResolvers value={dnsPath} onChange={setDnsPath} listener={serverName(acceptor)} dialer={serverName(dialer)} />}
                   <WsModeChoice transport={transport} value={wsMode} onChange={setWsMode} />
                   <Choice label={t("wz.profile")} value={profile} options={PROFILES.map((p) => [p, t(`wz.pf.${p}`)])} onChange={setProfile} hint={t(`wz.pf.${profile}.d`)} />
                 </div>

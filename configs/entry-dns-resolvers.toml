@@ -1,0 +1,31 @@
+# Entry side (Iran), direct mode, through DNS resolvers: for a shutdown that leaves only DNS.
+# Pair: exit-dns-resolvers.toml.
+#
+# The entry sends its packets as DNS queries to ordinary resolvers (the ones that still work
+# from this server: the data centre's or the ISP's), which pass them on to the exit as the
+# authoritative server of the tunnel domain. Slow (tens to a few hundred KB/s), but it gets
+# out where nothing else does.
+#
+# Set up the domain first, at your DNS provider:
+#   ns.example.com.  A   EXIT_SERVER_IP
+#   t.example.com.   NS  ns.example.com.
+role = "entry"
+mode = "direct"
+profile = "balanced"
+
+[tunnel]
+transport = "dns"
+remote = "EXIT_SERVER_IP:53"    # the exit; the traffic itself goes through the resolvers
+token = "CHANGE-ME-run-wormhole-token"
+
+[tunnel.dns]
+domain = "t.example.com"
+resolvers = ["8.8.8.8", "1.1.1.1", "9.9.9.9"]   # in a shutdown: the ones that answer here
+duplicate = 2                                   # each packet through two resolvers
+
+[[forward]]
+listen = "0.0.0.0:443"
+target = "127.0.0.1:443"
+
+[log]
+level = "info"

@@ -894,6 +894,9 @@ mod tests {
     #[test]
     fn the_accepting_server_is_the_exit_when_direct_and_the_entry_when_reverse() {
         let req = |mode: &str| crate::pair::PairRequest {
+            dns_domain: None,
+            dns_resolvers: None,
+            dns_duplicate: None,
             name: "t".into(),
             entry: "aaa".into(),
             exit: "bbb".into(),

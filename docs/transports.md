@@ -234,6 +234,77 @@ listen = "0.0.0.0:53"         # acceptor: UDP 53, where a DNS filter expects tra
 In the panel: pick *DNS* as the transport in the tunnel wizard and editor. Needs 1.2.0 on
 both servers.
 
+### Through DNS resolvers (`[tunnel.dns]`)
+
+When a shutdown leaves only DNS working, the two servers may not reach each other at all,
+but the inside server can still ask a DNS resolver, and the resolver can still ask the
+outside world. With `[tunnel.dns]`, `dns` goes that way: the dialing side sends its packets
+as **DNS queries to ordinary resolvers**, and they pass them on to the listening side as
+the **authoritative server of a domain** delegated to it.
+
+```toml
+# the listening side (outside): answers for the domain on UDP 53
+[tunnel]
+transport = "dns"
+listen = "0.0.0.0:53"
+[tunnel.dns]
+domain = "t.example.com"
+
+# the dialing side (inside): queries go to these resolvers
+[tunnel]
+transport = "dns"
+remote = "203.0.113.9:53"          # the other server (for the status; traffic goes via resolvers)
+[tunnel.dns]
+domain = "t.example.com"
+resolvers = ["8.8.8.8", "1.1.1.1", "9.9.9.9"]
+duplicate = 2                       # 1–4; each packet through as many resolvers (default 2)
+```
+
+**The domain.** At your DNS provider, give the listening server a name and delegate a
+subdomain to it:
+
+```text
+ns.example.com.  A   203.0.113.9        ; the listening server
+t.example.com.   NS  ns.example.com.
+```
+
+**How it works.**
+
+- **Up:** a packet is split into fragments of about 130 bytes (less with a long domain),
+  each base32 in the name of a TXT query (`<data>.t.example.com`) — base32, because
+  resolvers may change the case of a name. A counter in every name keeps any two from
+  being the same, so nothing is answered from a cache.
+- **Down:** the listener can only answer what it is asked, so the dialing side keeps a few
+  queries waiting there (eight while data moves, one when idle). The listener holds each
+  up to 350 ms and answers it with the packets it has for that session, in a TXT record,
+  or with nothing. An answer that says more is waiting brings more queries at once.
+- **Many resolvers.** Each query goes to the resolver with the best round trip and fewest
+  losses; a few go to the others, so their figures stay current. One that loses four
+  queries in a row is left out for 15 s, longer if it fails again (up to 4 minutes), then
+  tried again. With `duplicate`, each packet goes through that many different resolvers:
+  on a lossy path this saves the wait for a resend, at the cost of more queries.
+- **Above it, the same as `kcp`:** KCP resends what is lost, packets are sealed with the
+  token, and mux carries many connections in one session.
+
+**What to expect.**
+
+- **Slow:** tens to a few hundred KB/s, depending on the resolvers. It is for when nothing
+  else gets out.
+- **Small packets:** a packet must fit one answer within the 1232-byte EDNS0 buffer, so the
+  KCP MTU defaults to 600 here (at most 903), and a long domain leaves less room for the
+  query names (`wormhole check` says so).
+- **Port 53:** the listening side binds UDP 53 (root, or `CAP_NET_BIND_SERVICE`), where
+  resolvers ask. It answers other names of the domain with no records and other domains
+  with REFUSED.
+- **Which side dials:** the side inside must dial, so in a shutdown use `mode = "direct"`
+  with the entry inside.
+- **Resolvers:** the defaults are public ones. In a shutdown, put the ones that still work
+  from the inside server (its data centre's or ISP's); `8.8.8.8` may not answer there.
+
+In the panel: pick *DNS*, then *Through DNS resolvers*, and fill in the domain and the
+resolvers; the port becomes 53. Needs 1.2.5 on both servers. Sample configs:
+`configs/entry-dns-resolvers.toml`, `configs/exit-dns-resolvers.toml`.
+
 ## `grpc`
 
 `transport = "grpc"` carries the tunnel as one **bidirectional gRPC call over HTTP/2**. The

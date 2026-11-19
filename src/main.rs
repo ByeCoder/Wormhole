@@ -388,6 +388,22 @@ fn print_summary(config: &Config) {
     if let Some(remote) = &config.tunnel.remote {
         println!("  remote    : {remote}");
     }
+    if let Some(dns) = &config.tunnel.dns {
+        if config.is_acceptor() {
+            println!(
+                "  dns       : the authoritative server of {} (resolvers ask here)",
+                dns.domain
+            );
+        } else {
+            println!(
+                "  dns       : through the resolvers {} to {} ({} cop{} of each packet)",
+                dns.resolvers.join(", "),
+                dns.domain,
+                dns.duplicate,
+                if dns.duplicate == 1 { "y" } else { "ies" }
+            );
+        }
+    }
     let cipher = Cipher::for_config(config.tunnel.encryption);
     match config.tunnel.encryption {
         _ if config.tunnel.transport == TransportKind::Quic => {

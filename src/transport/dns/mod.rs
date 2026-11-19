@@ -9,5 +9,12 @@
 //! Wormhole is a direct server-to-server tunnel, so these messages do not pass through a
 //! recursive resolver: the sealed KCP packet rides whole in a record's RDATA rather than
 //! being squeezed into the query name (see [`packet`]). Works over IPv4 and IPv6.
+//!
+//! With `[tunnel.dns] resolvers` the packets go through real recursive resolvers instead,
+//! to a listener that is the authoritative server of `[tunnel.dns] domain` (see
+//! [`resolver`]): slower, but it gets out where only DNS does.
 
 pub mod packet;
+#[cfg(feature = "kcp")]
+pub mod resolver;
+pub mod wire;

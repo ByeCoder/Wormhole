@@ -466,6 +466,13 @@ export interface PairRequest {
   shadowtls_handshake?: string;
   /** `multi`: the transports it runs at once, each on the next port after the tunnel's. */
   multi?: string[];
+  /** `dns` through resolvers (1.2.5): the domain delegated to the listening side, the
+   *  resolvers the dialing side queries, and copies of each packet. */
+  dns_domain?: string;
+  dns_resolvers?: string[];
+  dns_duplicate?: number;
+  /** A spec's `[tunnel.dns]`. */
+  dns?: { domain: string; resolvers?: string[]; duplicate?: number };
   mux?: MuxSpec;
   /** Paqet only: `[tunnel.kcp]` tuning. */
   kcp?: KcpSpec;
@@ -510,6 +517,13 @@ export interface Spec {
   shadowtls_handshake?: string;
   /** `multi`: the transports it runs at once, each on the next port after the tunnel's. */
   multi?: string[];
+  /** `dns` through resolvers (1.2.5): the domain delegated to the listening side, the
+   *  resolvers the dialing side queries, and copies of each packet. */
+  dns_domain?: string;
+  dns_resolvers?: string[];
+  dns_duplicate?: number;
+  /** A spec's `[tunnel.dns]`. */
+  dns?: { domain: string; resolvers?: string[]; duplicate?: number };
   tls_pin?: string;
   mux?: MuxSpec;
   /** Paqet only: the `[tunnel.kcp]` table that was in the file. */
