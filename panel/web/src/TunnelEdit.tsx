@@ -10,6 +10,8 @@ import { MuxFields, MuxToggle, SpreadToggle, muxFromSpec, muxSpecOf, muxToSpec }
 import { TlsChoice, emptyTls, isLetsEncrypt, tlsReady } from "./TlsChoice";
 import { EncryptionChoice, cipherOf, cipherReady } from "./EncryptionChoice";
 import { QuicObfs, obfsOf } from "./QuicObfs";
+import { DnsResolvers, NO_DNS_PATH, dnsFields, dnsProblem, readDnsPath } from "./DnsResolvers";
+import type { DnsPath } from "./DnsResolvers";
 import { MultiPicker, membersReady, readMembers } from "./MultiPicker";
 import { KcpFields, emptyKcp, kcpFromSpec, kcpSpecOf, kcpToSpec } from "./PaqetFields";
 import { SpoofFields, emptySpoof, spoofFromPair, spoofToPair } from "./SpoofFields";
@@ -64,6 +66,13 @@ export function TunnelEdit({ tunnel, servers, preset, onBack }: { tunnel: Tunnel
   // A multi tunnel's transports, in port order.
   const [members, setMembers] = useState<string[]>(readMembers(undefined));
   const multi = transport === "multi";
+  // dns through real resolvers ([tunnel.dns]): the listening side then answers on port 53.
+  const [dnsPath, setDnsPathState] = useState<DnsPath>(NO_DNS_PATH);
+  // Resolvers ask on port 53: turning the path on moves a dns tunnel there.
+  const setDnsPath = (v: DnsPath) => {
+    if (v.on && !dnsPath.on && transport === "dns") setListenPort("53");
+    setDnsPathState(v);
+  };
   // Whether the tunnel runs `x`: as its transport, or as one of a multi tunnel's.
   const has = (x: string) => runsTransport(transport, members, x);
   const [muxOn, setMuxOn] = useState(true);
@@ -146,6 +155,7 @@ export function TunnelEdit({ tunnel, servers, preset, onBack }: { tunnel: Tunnel
         const split = splitTransport(a.transport || b.transport, a.mux ?? b.mux);
         setTransport(split.transport);
         setMembers(readMembers(a.multi ?? b.multi));
+        setDnsPathState(readDnsPath([a, b]));
         setMuxOn(split.mux);
         setProfile(a.profile ?? "balanced");
         setLoadedHost(hostOf(acc.listen));
@@ -273,6 +283,7 @@ export function TunnelEdit({ tunnel, servers, preset, onBack }: { tunnel: Tunnel
     rotate: rotate ? true : undefined,
     forwards: parsed.forwards,
     multi: multi ? members : undefined,
+    ...(has("dns") ? dnsFields(dnsPath) : {}),
   });
 
   // What was loaded, to tell whether anything changed.
@@ -329,6 +340,7 @@ export function TunnelEdit({ tunnel, servers, preset, onBack }: { tunnel: Tunnel
     if ((transport === "paqet" || transport === "icmp") && isV6(dialHost)) return t("paqet.ip");
     if (isWs && !wsPath.startsWith("/")) return t("wz.wsPath");
     if (multi && !membersReady(members)) return t("wz.multi.need2");
+    if (has("dns") && dnsProblem(dnsPath)) return t(dnsProblem(dnsPath)!);
     if (has("wss") && !tlsReady(tls)) return t(tls.mode === "own" ? "tls.needOwn" : "tls.needCert");
     if (!cipherReady(enc, transport, encAck)) return t("enc.needAck");
     if (parsed.bad !== undefined) return parsed.bad ? t("wz.badPorts", { bit: parsed.bad }) : t("wz.ports");
@@ -482,6 +494,7 @@ export function TunnelEdit({ tunnel, servers, preset, onBack }: { tunnel: Tunnel
               {joinTransport(transport, muxOn).core !== tunnel.transport && <span className="help warn-text">{t("te.transportChange")}</span>}
             </Choice>
             {multi && <MultiPicker value={members} onChange={setMembers} port={listenPort} />}
+            {has("dns") && <DnsResolvers value={dnsPath} onChange={setDnsPath} listener={serverName(acceptor)} dialer={serverName(dialer)} />}
             <WsModeChoice transport={transport} value={wsMode} onChange={setWsMode} />
             <Choice label={t("wz.profile")} value={profile} options={PROFILES.map((x) => [x, t(`wz.pf.${x}`)])} onChange={setProfile} hint={t(`wz.pf.${profile}.d`)} />
           </fieldset>

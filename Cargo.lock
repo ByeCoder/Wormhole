@@ -2370,7 +2370,7 @@ checksum = "23b97319f7b8343df12cc98938e5c3eb436064524c8d2b4e30a1d3a36eecdf81"
 
 [[package]]
 name = "wormhole"
-version = "1.2.4"
+version = "1.2.5"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -2405,7 +2405,7 @@ dependencies = [
 
 [[package]]
 name = "wormhole-panel"
-version = "1.2.4"
+version = "1.2.5"
 dependencies = [
  "anyhow",
  "argon2",

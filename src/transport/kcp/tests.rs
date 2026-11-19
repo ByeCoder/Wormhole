@@ -13,6 +13,7 @@ fn params(key: u8) -> KcpParams {
         key: [key; 32],
         carrier: CarrierKind::Udp,
         spoof: None,
+        dns: None,
     }
 }
 
@@ -274,6 +275,7 @@ fn params_paqet(key: u8) -> KcpParams {
         key: [key; 32],
         carrier: CarrierKind::Paqet,
         spoof: None,
+        dns: None,
     }
 }
 
@@ -284,6 +286,7 @@ fn params_icmp(key: u8) -> KcpParams {
         key: [key; 32],
         carrier: CarrierKind::Icmp,
         spoof: None,
+        dns: None,
     }
 }
 
@@ -306,6 +309,7 @@ fn params_dns(key: u8) -> KcpParams {
         key: [key; 32],
         carrier: CarrierKind::Dns,
         spoof: None,
+        dns: None,
     }
 }
 
@@ -348,6 +352,78 @@ async fn dns_round_trip_over_udp() {
         .expect("round trip in time")
         .unwrap();
     assert_eq!(got, b"over dns");
+}
+
+fn params_dns_path(key: u8, resolvers: Vec<SocketAddr>) -> KcpParams {
+    KcpParams {
+        config: KcpConfig {
+            mtu: 600,
+            ..Default::default()
+        },
+        key: [key; 32],
+        carrier: CarrierKind::Dns,
+        spoof: None,
+        dns: Some(Arc::new(DnsPath {
+            domain: crate::transport::dns::wire::Domain::parse("t.example.com").unwrap(),
+            resolvers,
+            duplicate: 2,
+        })),
+    }
+}
+
+/// Stands in for a recursive resolver: forwards each query to the listener and its answer
+/// back to whoever asked, dropping every `drop_every`-th message (0: none).
+async fn fake_resolver(listener: SocketAddr, drop_every: usize) -> SocketAddr {
+    let socket = Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap());
+    let addr = socket.local_addr().unwrap();
+    tokio::spawn(async move {
+        let mut buf = vec![0u8; 65_536];
+        let mut asked = std::collections::HashMap::new();
+        let mut seen = 0usize;
+        loop {
+            let (n, from) = socket.recv_from(&mut buf).await.unwrap();
+            seen += 1;
+            if drop_every > 0 && seen % drop_every == 0 {
+                continue;
+            }
+            let id = u16::from_be_bytes([buf[0], buf[1]]);
+            if from == listener {
+                if let Some(to) = asked.remove(&id) {
+                    let _ = socket.send_to(&buf[..n], to).await;
+                }
+            } else {
+                asked.insert(id, from);
+                let _ = socket.send_to(&buf[..n], listener).await;
+            }
+        }
+    });
+    addr
+}
+
+/// `dns` through resolvers: a KCP stream end to end, the listener answering as the
+/// domain's server, through two resolvers that each lose a query in nine.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dns_through_resolvers_carries_a_stream() {
+    let listen = params_dns_path(1, Vec::new());
+    let l = KcpListener::bind("127.0.0.1:0", &listen, &tuning())
+        .await
+        .expect("bound");
+    let at = l.local_addr().unwrap();
+    let resolvers = vec![fake_resolver(at, 9).await, fake_resolver(at, 9).await];
+    let dialer = KcpDialer::new("unused:53", &params_dns_path(1, resolvers), &tuning());
+    let client = tokio::time::timeout(Duration::from_secs(10), dialer.dial())
+        .await
+        .expect("dialed in time")
+        .expect("dialed");
+    let server = accept(&l).await;
+    echo(server);
+    // Bigger than a packet both ways, so it takes several polls and fragments.
+    let payload: Vec<u8> = (0..60_000u32).map(|i| (i % 251) as u8).collect();
+    let got = tokio::time::timeout(Duration::from_secs(60), round_trip(client, &payload))
+        .await
+        .expect("round trip in time")
+        .unwrap();
+    assert_eq!(got, payload);
 }
 
 /// A real raw ICMP socket on loopback. Root (or CAP_NET_RAW) and an opt-in are needed:

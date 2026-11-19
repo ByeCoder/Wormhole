@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.2.5 - 2026-11-19
+
+- **DNS through resolvers.** `transport = "dns"` with `[tunnel.dns]` goes through ordinary
+  recursive resolvers to a listener that is the authoritative server of a domain delegated
+  to it: for a shutdown where only DNS still gets out. The dialing side puts the packets in
+  the names of TXT queries (base32, in fragments) and keeps a few queries waiting at the
+  listener, which answers with the packets it has; it spreads its queries over the resolvers
+  that answer best, leaves out the ones that stop for a while, and with `duplicate` sends
+  each packet through several. KCP, the token's sealing and mux work above it as on `kcp`.
+  In the panel: *DNS*, then *Through DNS resolvers*. Sample configs:
+  `configs/entry-dns-resolvers.toml`, `configs/exit-dns-resolvers.toml`. Guide:
+  [Transports](docs/transports.md). Written for Wormhole from scratch, after the idea of
+  resolver tunnels such as MasterDnsVPN and dnstt.
+
 ## 1.2.4 - 2026-11-18
 
 - **One server in several panels.** A server that is in a panel already can join more:

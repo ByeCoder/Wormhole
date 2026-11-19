@@ -251,6 +251,18 @@ pub fn render(spec: &Spec, token: &str, cert_files: Option<(&Path, &Path)>) -> R
         st.insert("handshake".into(), text(handshake));
         tunnel.insert("shadowtls".into(), Value::Table(st));
     }
+    if let Some(dns) = &spec.dns {
+        let mut d = Table::new();
+        d.insert("domain".into(), text(&dns.domain));
+        if !dns.resolvers.is_empty() {
+            let list = dns.resolvers.iter().map(|r| text(r)).collect();
+            d.insert("resolvers".into(), Value::Array(list));
+        }
+        if let Some(n) = dns.duplicate {
+            d.insert("duplicate".into(), Value::Integer(i64::from(n)));
+        }
+        tunnel.insert("dns".into(), Value::Table(d));
+    }
     root.insert("tunnel".into(), Value::Table(tunnel));
     let mut tuning = Table::new();
     if let Some(limit) = spec.max_conns_per_ip.filter(|v| *v > 0) {
@@ -688,6 +700,11 @@ pub fn get(dir: &Path, name: &str) -> Result<Spec> {
         spoof,
         tls_sni: c.tunnel.tls.as_ref().and_then(|t| t.sni.clone()),
         shadowtls_handshake: c.tunnel.shadowtls.as_ref().map(|s| s.handshake.clone()),
+        dns: c.tunnel.dns.as_ref().map(|d| crate::wire::DnsSpec {
+            domain: d.domain.clone(),
+            resolvers: d.resolvers.clone(),
+            duplicate: Some(d.duplicate),
+        }),
         multi: c
             .tunnel
             .multi

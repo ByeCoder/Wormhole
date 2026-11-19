@@ -148,6 +148,9 @@ async fn a_pair_is_made_edited_stopped_deleted_and_a_failure_leaves_nothing() {
     let listen = free_port();
     let front = free_port();
     let request = |front: u16, dial_port: u16| PairRequest {
+        dns_domain: None,
+        dns_resolvers: None,
+        dns_duplicate: None,
         name: "pair-1".into(),
         entry: LOCAL.into(),
         exit: exit_id.clone(),
@@ -343,6 +346,9 @@ async fn a_tunnel_moves_to_another_server_and_a_move_that_fails_changes_nothing(
     let (listen, front) = (free_port(), free_port());
     // reverse: the panel's server (entry) listens, the exit dials it
     let request = |exit: &str, dial_port: u16| PairRequest {
+        dns_domain: None,
+        dns_resolvers: None,
+        dns_duplicate: None,
         name: "moving".into(),
         entry: LOCAL.into(),
         exit: exit.into(),

@@ -12,6 +12,7 @@ use tracing::debug;
 use crate::transport::mark_dscp;
 
 use crate::transport::dns::packet as dns_packet;
+use crate::transport::dns::resolver;
 #[cfg(target_os = "linux")]
 use crate::transport::icmp::raw as icmp_raw;
 #[cfg(target_os = "linux")]
@@ -37,6 +38,10 @@ enum Kind {
         socket: Arc<UdpSocket>,
         respond: bool,
     },
+    /// The dialing side of `dns` through resolvers.
+    DnsResolvers(Arc<resolver::Client>),
+    /// The listening side of `dns` through resolvers: the domain's server.
+    DnsAuthority(Arc<resolver::Authority>),
     #[cfg(target_os = "linux")]
     Paqet(Arc<raw::RawSocket>),
     #[cfg(target_os = "linux")]
@@ -115,6 +120,32 @@ impl PacketSocket {
             },
             local,
             peer: Some(peer),
+        })
+    }
+
+    /// The dialing side of `dns` through resolvers.
+    pub(crate) async fn dns_resolvers(dns: &super::DnsPath, buffer: usize) -> io::Result<Self> {
+        let client =
+            resolver::Client::start(dns.domain.clone(), &dns.resolvers, dns.duplicate, buffer)
+                .await?;
+        Ok(Self {
+            local: client.local_addr(),
+            peer: Some(client.best()),
+            kind: Kind::DnsResolvers(client),
+        })
+    }
+
+    /// The listening side of `dns` through resolvers: the authoritative server of the domain.
+    pub(crate) async fn dns_authority(
+        addr: SocketAddr,
+        dns: &super::DnsPath,
+        buffer: usize,
+    ) -> io::Result<Self> {
+        let authority = resolver::Authority::start(addr, dns.domain.clone(), buffer).await?;
+        Ok(Self {
+            local: authority.local_addr(),
+            peer: None,
+            kind: Kind::DnsAuthority(authority),
         })
     }
 
@@ -269,7 +300,7 @@ impl PacketSocket {
     pub(crate) fn is_paqet(&self) -> bool {
         match &self.kind {
             Kind::Udp(_) => false,
-            Kind::Dns { .. } => false,
+            Kind::Dns { .. } | Kind::DnsResolvers(_) | Kind::DnsAuthority(_) => false,
             #[cfg(target_os = "linux")]
             Kind::Paqet(_) => true,
             #[cfg(target_os = "linux")]
@@ -292,6 +323,8 @@ impl PacketSocket {
                     return Ok(len);
                 }
             },
+            Kind::DnsResolvers(client) => client.recv(buf).await,
+            Kind::DnsAuthority(authority) => authority.recv_from(buf).await.map(|(n, _)| n),
             #[cfg(target_os = "linux")]
             Kind::Paqet(socket) => socket.recv(buf).await.map(|(len, _)| len),
             #[cfg(target_os = "linux")]
@@ -311,6 +344,11 @@ impl PacketSocket {
                     return Ok((len, peer));
                 }
             },
+            Kind::DnsResolvers(client) => {
+                let n = client.recv(buf).await?;
+                Ok((n, self.peer.unwrap_or(self.local)))
+            }
+            Kind::DnsAuthority(authority) => authority.recv_from(buf).await,
             #[cfg(target_os = "linux")]
             Kind::Paqet(socket) => socket.recv(buf).await,
             #[cfg(target_os = "linux")]
@@ -329,6 +367,11 @@ impl PacketSocket {
                 dns_wrap(payload, *respond, _scratch)?;
                 socket.try_send(_scratch)
             }
+            Kind::DnsResolvers(client) => client.try_send(payload),
+            Kind::DnsAuthority(_) => Err(io::Error::new(
+                io::ErrorKind::NotConnected,
+                "the dns listener answers sessions, it has no single peer",
+            )),
             #[cfg(target_os = "linux")]
             Kind::Paqet(socket) => socket.try_send(payload, _scratch),
             #[cfg(target_os = "linux")]
@@ -351,6 +394,8 @@ impl PacketSocket {
                 dns_wrap(payload, *respond, _scratch)?;
                 socket.try_send_to(_scratch, peer)
             }
+            Kind::DnsResolvers(client) => client.try_send(payload),
+            Kind::DnsAuthority(authority) => authority.try_send_to(payload, peer),
             #[cfg(target_os = "linux")]
             Kind::Paqet(socket) => socket.try_send_to(payload, peer, _scratch),
             #[cfg(target_os = "linux")]

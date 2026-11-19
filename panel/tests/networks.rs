@@ -209,6 +209,9 @@ async fn links_are_made_on_both_servers_reused_undone_and_protected() {
         }
     };
     let tunnel = |mode: &str, network: Option<String>| PairRequest {
+        dns_domain: None,
+        dns_resolvers: None,
+        dns_duplicate: None,
         name: "over".into(),
         entry: LOCAL.into(),
         exit: remote.clone(),

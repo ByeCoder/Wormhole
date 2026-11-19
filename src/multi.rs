@@ -128,6 +128,9 @@ impl Config {
         if kind != TransportKind::Shadowtls {
             t.shadowtls = None;
         }
+        if kind != TransportKind::Dns {
+            t.dns = None;
+        }
         c
     }
 
@@ -201,6 +204,11 @@ impl Config {
                 self.tunnel.shadowtls.is_some(),
                 |k| k == TransportKind::Shadowtls,
                 "shadowtls",
+            ),
+            (
+                self.tunnel.dns.is_some(),
+                |k| k == TransportKind::Dns,
+                "dns",
             ),
         ] {
             if present && !used(reads) {

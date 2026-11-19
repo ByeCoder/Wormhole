@@ -25,6 +25,14 @@
 //! Packets that were not sealed with the token get no answer at all.
 
 mod carrier;
+
+/// A UDP socket with the tunnel's buffer sizes, for carriers outside this module.
+pub(crate) fn bind_udp_socket(
+    addr: std::net::SocketAddr,
+    buffer: usize,
+) -> std::io::Result<tokio::net::UdpSocket> {
+    carrier::bind_udp(addr, buffer, None)
+}
 mod fec;
 pub mod protect;
 
@@ -123,6 +131,16 @@ pub struct KcpParams {
     carrier: CarrierKind,
     /// Set for `transport = "spoof"`: the forged source and peer addresses.
     spoof: Option<SpoofParams>,
+    /// `dns` through resolvers (`[tunnel.dns]`).
+    dns: Option<Arc<DnsPath>>,
+}
+
+/// The resolver path of `dns`: the domain, and on the dialing side the resolvers.
+#[derive(Debug)]
+pub(crate) struct DnsPath {
+    pub(crate) domain: crate::transport::dns::wire::Domain,
+    pub(crate) resolvers: Vec<SocketAddr>,
+    pub(crate) duplicate: usize,
 }
 
 /// The forged addresses a `spoof` carrier needs.
@@ -167,6 +185,7 @@ impl KcpParams {
             key: Psk::new(&tunnel.token).subkey(KEY_CONTEXT),
             carrier: CarrierKind::Udp,
             spoof: None,
+            dns: None,
         }
     }
 
@@ -178,6 +197,7 @@ impl KcpParams {
             key: Psk::new(&tunnel.token).subkey(PAQET_KEY_CONTEXT),
             carrier: CarrierKind::Paqet,
             spoof: None,
+            dns: None,
         }
     }
 
@@ -190,6 +210,7 @@ impl KcpParams {
             key: Psk::new(&tunnel.token).subkey(SPOOF_KEY_CONTEXT),
             carrier: CarrierKind::Spoof,
             spoof,
+            dns: None,
         }
     }
 
@@ -201,17 +222,27 @@ impl KcpParams {
             key: Psk::new(&tunnel.token).subkey(ICMP_KEY_CONTEXT),
             carrier: CarrierKind::Icmp,
             spoof: None,
+            dns: None,
         }
     }
 
     /// `transport = "dns"`: the same KCP settings and packet format, with a key of its own
     /// and a UDP carrier that wraps each packet in a DNS query or response.
     pub fn new_dns(tunnel: &TunnelConfig, config: KcpConfig) -> Self {
+        // Checked by the config's validation; a bad value here leaves the direct path.
+        let dns = tunnel.dns.as_ref().and_then(|d| {
+            Some(Arc::new(DnsPath {
+                domain: crate::transport::dns::wire::Domain::parse(&d.domain).ok()?,
+                resolvers: d.resolver_addrs().ok()?,
+                duplicate: usize::from(d.duplicate),
+            }))
+        });
         Self {
             config,
             key: Psk::new(&tunnel.token).subkey(DNS_KEY_CONTEXT),
             carrier: CarrierKind::Dns,
             spoof: None,
+            dns,
         }
     }
 }
@@ -245,6 +276,8 @@ struct ConnSettings {
     carrier: CarrierKind,
     /// Set for `spoof`: the forged addresses the raw carrier sends and expects.
     spoof: Option<SpoofParams>,
+    /// Set for `dns` through resolvers.
+    dns: Option<Arc<DnsPath>>,
     protection: Arc<Protection>,
     /// Data and parity shards per FEC group; `None`: FEC off.
     fec: Option<(usize, usize)>,
@@ -263,6 +296,7 @@ impl ConnSettings {
             datagrams: params.config.datagrams,
             carrier: params.carrier,
             spoof: params.spoof.clone(),
+            dns: params.dns.clone(),
             protection: Arc::new(Protection::new(&params.key)),
             fec: params.config.fec(),
         }
@@ -1371,6 +1405,16 @@ impl KcpDialer {
     }
 
     pub async fn dial(&self) -> io::Result<KcpStream> {
+        // Through resolvers: the remote is not dialed, the resolvers are.
+        if let Some(dns) = self
+            .settings
+            .dns
+            .clone()
+            .filter(|d| !d.resolvers.is_empty())
+        {
+            let socket = PacketSocket::dns_resolvers(&dns, self.settings.socket_buffer).await?;
+            return self.start(socket, dns.resolvers[0]);
+        }
         let mut addresses = tokio::net::lookup_host(&self.remote).await?;
         let peer = if self.settings.ipv4_only() {
             addresses.find(|addr| addr.is_ipv4()).ok_or_else(|| {
@@ -1396,6 +1440,11 @@ impl KcpDialer {
         } else {
             PacketSocket::udp_connect(peer, buffer, dscp).await?
         };
+        self.start(socket, peer)
+    }
+
+    /// Starts a connection over `socket`, whose peer is `peer` (for the status).
+    fn start(&self, socket: PacketSocket, peer: SocketAddr) -> io::Result<KcpStream> {
         let peer = socket.peer_addr().unwrap_or(peer);
         let conv = Nonces::new()?.next_u32();
         let inbound = Inbound::Dialer {
@@ -1447,6 +1496,12 @@ impl KcpListener {
             off_runtime(move || PacketSocket::icmp_listen(addr, buffer, dscp)).await?
         } else if settings.carrier == CarrierKind::Paqet {
             off_runtime(move || PacketSocket::paqet_listen(addr, buffer, dscp)).await?
+        } else if let Some(dns) = settings
+            .dns
+            .clone()
+            .filter(|_| settings.carrier == CarrierKind::Dns)
+        {
+            PacketSocket::dns_authority(addr, &dns, buffer).await?
         } else if settings.carrier == CarrierKind::Dns {
             PacketSocket::dns_listen(addr, buffer, dscp)?
         } else {

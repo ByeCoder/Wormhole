@@ -432,6 +432,20 @@ impl SpoofSpec {
 
 /// What a tunnel is, as data: everything the manager's `add` takes, without free text
 /// going into the file. The agent turns it into the config.
+/// `[tunnel.dns]` of a tunnel through DNS resolvers.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DnsSpec {
+    /// The domain delegated to the listening side.
+    pub domain: String,
+    /// The dialing side: the resolvers it queries (empty on the listening side).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resolvers: Vec<String>,
+    /// The dialing side: copies of each packet, through as many resolvers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duplicate: Option<u8>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Spec {
@@ -471,6 +485,10 @@ pub struct Spec {
     /// next port after the tunnel's. Only an agent of 1.2.0 or newer reads it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub multi: Option<Vec<String>>,
+    /// `dns` through resolvers: `[tunnel.dns]`, the domain on both sides and the resolvers
+    /// on the dialing side. Only an agent of 1.2.5 or newer reads it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dns: Option<DnsSpec>,
     /// A listening wss side: the certificate and key files of a real certificate (made by
     /// [`Request::TunnelCert`], under `/etc/letsencrypt/live/`) instead of a self-signed one.
     #[serde(default, skip_serializing_if = "Option::is_none")]

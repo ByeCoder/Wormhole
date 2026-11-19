@@ -50,6 +50,16 @@ pub struct PairRequest {
     /// after the tunnel's, the same on both sides.
     #[serde(default)]
     pub multi: Option<Vec<String>>,
+    /// `dns` through resolvers: the domain delegated to the listening side (empty or left
+    /// out: the direct `dns`, straight to the other server).
+    #[serde(default)]
+    pub dns_domain: Option<String>,
+    /// … the resolvers the dialing side queries (`IP` or `IP:port`) …
+    #[serde(default)]
+    pub dns_resolvers: Option<Vec<String>>,
+    /// … and how many copies of each packet it sends, through as many resolvers (1–4).
+    #[serde(default)]
+    pub dns_duplicate: Option<u8>,
     /// Mux settings, the same on both sides; left out, the profile's apply.
     #[serde(default)]
     pub mux: Option<crate::wire::MuxSpec>,
@@ -176,6 +186,7 @@ impl PairRequest {
             multi: (self.transport == "multi")
                 .then(|| self.multi.clone())
                 .flatten(),
+            dns: self.dns_spec(accepts),
             tls_pin: (!accepts && self.runs("wss") && self.tls_cert.is_none())
                 .then(|| pin.map(str::to_owned))
                 .flatten(),
@@ -487,6 +498,10 @@ impl PairRequest {
         if self.needs_shadowtls() && !release_at_least(version, SHADOWTLS_SINCE) {
             bail!("old_agent_shadowtls:{id}:{version}");
         }
+        // dns through resolvers came with 1.2.5; both sides take part.
+        if self.dns_domain().is_some() && !release_at_least(version, DNS_RESOLVERS_SINCE) {
+            bail!("old_agent_dns_resolvers:{id}:{version}");
+        }
         Ok(())
     }
 
@@ -518,6 +533,66 @@ impl PairRequest {
     /// refuses a table no member reads).
     fn reads_ws(&self) -> bool {
         self.transport != "multi" || self.runs("ws") || self.runs("wss")
+    }
+
+    /// The domain of a `dns` tunnel through resolvers, if it is one.
+    fn dns_domain(&self) -> Option<String> {
+        self.dns_domain
+            .as_deref()
+            .map(|d| d.trim().trim_end_matches('.').to_ascii_lowercase())
+            .filter(|d| !d.is_empty() && self.runs("dns"))
+    }
+
+    /// `[tunnel.dns]` for one side: the domain on both, the resolvers on the dialing one.
+    fn dns_spec(&self, accepts: bool) -> Option<crate::wire::DnsSpec> {
+        let domain = self.dns_domain()?;
+        Some(crate::wire::DnsSpec {
+            domain,
+            resolvers: if accepts {
+                Vec::new()
+            } else {
+                self.resolvers()
+            },
+            duplicate: (!accepts).then_some(self.dns_duplicate).flatten(),
+        })
+    }
+
+    fn resolvers(&self) -> Vec<String> {
+        self.dns_resolvers
+            .iter()
+            .flatten()
+            .map(|r| r.trim().to_owned())
+            .filter(|r| !r.is_empty())
+            .collect()
+    }
+
+    /// Checks a `dns` tunnel through resolvers: a domain the core takes, resolvers that are
+    /// addresses, and the listening side on port 53, where resolvers ask.
+    fn validate_dns(&self) -> Result<()> {
+        let Some(domain) = self.dns_domain() else {
+            return Ok(());
+        };
+        if wormhole::transport::dns::wire::Domain::parse(&domain).is_err() {
+            bail!("bad_dns_domain");
+        }
+        let resolvers = self.resolvers();
+        if resolvers.is_empty() {
+            bail!("dns_needs_resolvers");
+        }
+        for r in &resolvers {
+            let ok =
+                r.parse::<std::net::SocketAddr>().is_ok() || r.parse::<std::net::IpAddr>().is_ok();
+            if !ok {
+                bail!("bad_dns_resolver");
+            }
+        }
+        if self.dns_duplicate.is_some_and(|d| !(1..=4).contains(&d)) {
+            bail!("bad_dns_duplicate");
+        }
+        if self.transport == "dns" && !self.listen.ends_with(":53") {
+            bail!("dns_port_53");
+        }
+        Ok(())
     }
 
     /// Whether this is a `multi` tunnel (several transports at once).
@@ -579,6 +654,7 @@ impl PairRequest {
         }
         self.validate_spoof()?;
         self.validate_multi()?;
+        self.validate_dns()?;
         Ok(())
     }
 
@@ -725,6 +801,8 @@ pub const MULTI_MEMBERS: [&str; 9] = [
 
 /// The release that brought the `multi` transport (several transports in one tunnel).
 pub const MULTI_SINCE: &str = "1.2.0";
+/// The first release with `dns` through resolvers (`[tunnel.dns]`).
+pub const DNS_RESOLVERS_SINCE: &str = "1.2.5";
 
 /// A `paqet` tunnel's `[tunnel.kcp]` table, and only its: an empty table is the same as
 /// none, and another transport never gets the table (the core refuses it there).
@@ -1912,6 +1990,9 @@ mod tests {
             )
         };
         let to = |entry: &str, exit: &str| PairRequest {
+            dns_domain: None,
+            dns_resolvers: None,
+            dns_duplicate: None,
             name: "t".into(),
             entry: entry.into(),
             exit: exit.into(),
@@ -1972,6 +2053,9 @@ mod tests {
     #[test]
     fn a_cipher_must_be_one_the_core_knows_and_not_on_quic() {
         let req = |transport: &str, enc: Option<&str>| PairRequest {
+            dns_domain: None,
+            dns_resolvers: None,
+            dns_duplicate: None,
             name: "t".into(),
             entry: "a".into(),
             exit: "b".into(),
@@ -2075,6 +2159,88 @@ mod tests {
     }
 
     #[test]
+    fn a_dns_tunnel_through_resolvers_gives_each_side_its_part() {
+        let req =
+            |mode: &str, listen: &str, domain: Option<&str>, resolvers: &[&str]| PairRequest {
+                name: "d".into(),
+                entry: "a".into(),
+                exit: "b".into(),
+                mode: mode.into(),
+                transport: "dns".into(),
+                listen: listen.into(),
+                dial: "203.0.113.5:53".into(),
+                dns_domain: domain.map(str::to_owned),
+                dns_resolvers: Some(resolvers.iter().map(|r| (*r).to_owned()).collect()),
+                dns_duplicate: Some(2),
+                ..Default::default()
+            };
+        // Direct: the entry (inside) dials through the resolvers, the exit answers as the
+        // domain's server.
+        let r = req(
+            "direct",
+            "0.0.0.0:53",
+            Some("T.Example.com."),
+            &["8.8.8.8", "1.1.1.1:53"],
+        );
+        r.validate().unwrap();
+        let (entry, exit) = r.specs(None, None);
+        let e = entry.dns.unwrap();
+        assert_eq!(e.domain, "t.example.com");
+        assert_eq!(e.resolvers, ["8.8.8.8", "1.1.1.1:53"]);
+        assert_eq!(e.duplicate, Some(2));
+        let x = exit.dns.clone().unwrap();
+        assert!(x.resolvers.is_empty() && x.duplicate.is_none());
+        let written = crate::manage::render(&exit, &"a".repeat(48), None).unwrap();
+        assert!(
+            written.contains("[tunnel.dns]") && written.contains("t.example.com"),
+            "{written}"
+        );
+        // Without a domain: the direct dns, no table.
+        let (entry, _) = req("direct", "0.0.0.0:53", None, &[]).specs(None, None);
+        assert!(entry.dns.is_none());
+        let code = |r: PairRequest| r.validate().unwrap_err().to_string();
+        assert_eq!(
+            code(req(
+                "direct",
+                "0.0.0.0:53",
+                Some("bad_domain.com"),
+                &["8.8.8.8"]
+            )),
+            "bad_dns_domain"
+        );
+        assert_eq!(
+            code(req("direct", "0.0.0.0:53", Some("t.example.com"), &[])),
+            "dns_needs_resolvers"
+        );
+        assert_eq!(
+            code(req(
+                "direct",
+                "0.0.0.0:53",
+                Some("t.example.com"),
+                &["dns.google"]
+            )),
+            "bad_dns_resolver"
+        );
+        assert_eq!(
+            code(req(
+                "direct",
+                "0.0.0.0:5353",
+                Some("t.example.com"),
+                &["8.8.8.8"]
+            )),
+            "dns_port_53"
+        );
+        // An agent before 1.2.5 cannot run it.
+        let r = req("direct", "0.0.0.0:53", Some("t.example.com"), &["8.8.8.8"]);
+        assert!(r
+            .require_version("x", "1.2.4")
+            .unwrap_err()
+            .to_string()
+            .starts_with("old_agent_dns_resolvers"));
+        r.require_version("x", "1.2.5").unwrap();
+    }
+
+    #[test]
     fn a_shadowtls_tunnel_left_without_a_site_borrows_the_default_one() {
         let req = |transport: &str, site: Option<&str>| PairRequest {
             name: "s".into(),
@@ -2118,6 +2284,9 @@ mod tests {
     #[test]
     fn sealed_quic_is_for_quic_only_and_needs_a_new_agent() {
         let req = |transport: &str, obfs: bool| PairRequest {
+            dns_domain: None,
+            dns_resolvers: None,
+            dns_duplicate: None,
             name: "t".into(),
             entry: "a".into(),
             exit: "b".into(),
@@ -2164,6 +2333,9 @@ mod tests {
     #[test]
     fn the_per_address_limit_goes_to_the_entry_side_and_needs_2_4() {
         let req = |limit: Option<u32>, max_streams: Option<u32>| PairRequest {
+            dns_domain: None,
+            dns_resolvers: None,
+            dns_duplicate: None,
             name: "t".into(),
             entry: "a".into(),
             exit: "b".into(),
@@ -2217,6 +2389,9 @@ mod tests {
     #[test]
     fn the_udp_flow_limit_goes_to_the_entry_side_and_needs_the_release_that_writes_it() {
         let req = |flows: Option<u32>| PairRequest {
+            dns_domain: None,
+            dns_resolvers: None,
+            dns_duplicate: None,
             name: "t".into(),
             entry: "a".into(),
             exit: "b".into(),
@@ -2303,6 +2478,9 @@ mod tests {
     #[test]
     fn the_proxy_header_goes_to_the_entry_side_and_needs_2_5_on_both() {
         let req = |proxy: Option<&str>| PairRequest {
+            dns_domain: None,
+            dns_resolvers: None,
+            dns_duplicate: None,
             name: "t".into(),
             entry: "a".into(),
             exit: "b".into(),
@@ -2368,6 +2546,9 @@ mod tests {
     #[test]
     fn auto_and_mux_settings_need_new_servers() {
         let req = |transport: &str, mux: Option<crate::wire::MuxSpec>| PairRequest {
+            dns_domain: None,
+            dns_resolvers: None,
+            dns_duplicate: None,
             name: "t".into(),
             entry: "a".into(),
             exit: "b".into(),
@@ -2430,6 +2611,9 @@ mod tests {
     #[test]
     fn a_real_certificate_is_checked_against_the_name_it_was_issued_for() {
         let req = |sni: Option<&str>, ws_host: Option<&str>, real: bool| PairRequest {
+            dns_domain: None,
+            dns_resolvers: None,
+            dns_duplicate: None,
             name: "t".into(),
             entry: "a".into(),
             exit: "b".into(),

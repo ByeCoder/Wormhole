@@ -270,6 +270,33 @@ test.describe("the tunnel", () => {
     expect(await refuses(front), "a deleted tunnel listens nowhere").toBe(true);
   });
 
+  test("offers dns through resolvers: a domain, resolvers, and port 53", async ({ page }) => {
+    await signIn(page);
+    await goTo(page, "tunnels");
+    await page.locator(".page-band .btn-primary").click();
+    await page.locator("#wz-name").fill("via-dns");
+    await page.locator(".pick-list").nth(0).locator("button").nth(0).click();
+    await page.locator(".pick-list").nth(1).locator("button").nth(1).click();
+    await next(page);
+    await page.getByRole("button", { name: "dns", exact: true }).click();
+    await page.getByLabel("Through DNS resolvers (for a shutdown)").check();
+    // public resolvers to start from, and a domain to fill in before going on
+    await expect(page.locator("#wz-dns-resolvers")).toHaveValue("8.8.8.8, 1.1.1.1, 9.9.9.9");
+    await next(page);
+    await expect(page.getByText("Enter the delegated domain").first()).toBeVisible();
+    await page.locator("#wz-dns-domain").fill("t.example.com");
+    await page.locator("#wz-dns-resolvers").fill("8.8.8.8, dns.google");
+    await next(page);
+    await expect(page.getByText("A resolver is an IP or IP:port").first()).toBeVisible();
+    await page.locator("#wz-dns-resolvers").fill("8.8.8.8, 1.1.1.1:53");
+    await next(page);
+    // resolvers ask on port 53
+    await expect(page.locator("#wz-port")).toHaveValue("53");
+    // leave the wizard without building (the corner cross)
+    await page.getByRole("button", { name: "Close" }).first().click();
+    await expect(page.locator("#wz-name")).toHaveCount(0);
+  });
+
   test("runs several transports at once with multi, and carries traffic over them", async ({ page }) => {
     const multiFront = await freePort();
     // tcp, ws and xhttp (the ones it starts with), each on a port of its own: three free in a row

@@ -2845,3 +2845,90 @@ async fn kcp_transfer_survives_loss() {
         run.await.unwrap();
     }
 }
+
+/// Stands in for a recursive resolver between the two sides of a `dns` tunnel through
+/// resolvers: every query to the listener, every answer back to whoever asked. Drops every
+/// `drop_every`-th message (0: none).
+async fn fake_resolver(listener: u16, drop_every: usize) -> u16 {
+    let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let port = socket.local_addr().unwrap().port();
+    let listener: std::net::SocketAddr = ([127, 0, 0, 1], listener).into();
+    tokio::spawn(async move {
+        let mut buf = vec![0u8; 65_536];
+        let mut asked = std::collections::HashMap::new();
+        let mut seen = 0usize;
+        while let Ok((n, from)) = socket.recv_from(&mut buf).await {
+            seen += 1;
+            if drop_every > 0 && seen % drop_every == 0 {
+                continue;
+            }
+            let id = u16::from_be_bytes([buf[0], buf[1]]);
+            if from == listener {
+                if let Some(to) = asked.remove(&id) {
+                    let _ = socket.send_to(&buf[..n], to).await;
+                }
+            } else {
+                asked.insert(id, from);
+                let _ = socket.send_to(&buf[..n], listener).await;
+            }
+        }
+    });
+    port
+}
+
+/// `dns` through resolvers, the daemons end to end: the exit answers as the domain's
+/// server, the entry sends its queries through two resolvers that lose some, and a TCP
+/// connection crosses both ways.
+#[tokio::test]
+async fn a_dns_tunnel_crosses_through_resolvers() {
+    let target = echo_server().await;
+    let tunnel_port = free_port();
+    let user_port = free_port();
+    let (r1, r2) = (
+        fake_resolver(tunnel_port, 13).await,
+        fake_resolver(tunnel_port, 0).await,
+    );
+    let exit = format!(
+        r#"
+        role = "exit"
+        mode = "direct"
+        [tunnel]
+        transport = "dns"
+        listen = "127.0.0.1:{tunnel_port}"
+        token = "{TOKEN}"
+        [tunnel.dns]
+        domain = "t.example.com"
+        "#
+    );
+    let entry = format!(
+        r#"
+        role = "entry"
+        mode = "direct"
+        [[forward]]
+        listen = "127.0.0.1:{user_port}"
+        target = "127.0.0.1:{target}"
+        [tunnel]
+        transport = "dns"
+        remote = "203.0.113.9:53"
+        token = "{TOKEN}"
+        [tunnel.dns]
+        domain = "t.example.com"
+        resolvers = ["127.0.0.1:{r1}", "127.0.0.1:{r2}"]
+        "#
+    );
+    let _exit = Side::start(&exit);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let _entry = Side::start(&entry);
+    let payload: Vec<u8> = (0..40_000u32).map(|i| (i % 253) as u8).collect();
+    let mut last = None;
+    for _ in 0..40 {
+        match tokio::time::timeout(Duration::from_secs(30), echo_roundtrip(user_port, &payload))
+            .await
+        {
+            Ok(Ok(got)) if got == payload => return,
+            other => last = Some(format!("{other:?}").chars().take(200).collect::<String>()),
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    panic!("no round trip through the resolvers: {last:?}");
+}
