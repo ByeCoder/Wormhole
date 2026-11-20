@@ -319,8 +319,20 @@ impl Peer {
             streams: mux.then_some(streams),
             streams_max: (mux && self.max_streams > 0).then_some(open_sessions * self.max_streams),
             full: self.full.load(Relaxed),
-            dns_resolvers: crate::transport::dns::resolver::snapshot(64),
+            dns_resolvers: dns_resolvers(),
         }
+    }
+}
+
+/// The resolvers of a `dns` tunnel through resolvers (none without KCP).
+fn dns_resolvers() -> Vec<DnsResolverInfo> {
+    #[cfg(feature = "kcp")]
+    {
+        crate::transport::dns::resolver::snapshot(64)
+    }
+    #[cfg(not(feature = "kcp"))]
+    {
+        Vec::new()
     }
 }
 

@@ -436,7 +436,7 @@ fn default_scan_parallel() -> usize {
 impl DnsConfig {
     /// The resolvers as addresses: the list, then the file's, ranges expanded.
     pub fn resolver_addrs(&self) -> Result<Vec<std::net::SocketAddr>> {
-        use crate::transport::dns::resolver;
+        use crate::transport::dns::list as resolver;
         let file = match &self.resolvers_file {
             Some(path) => std::fs::read_to_string(path).with_context(|| {
                 format!("[tunnel.dns] resolvers_file: reading {}", path.display())
@@ -452,8 +452,8 @@ impl DnsConfig {
     }
 
     /// The balancing strategy (checked by validation; `hybrid` if not known).
-    pub fn balance(&self) -> crate::transport::dns::resolver::Balance {
-        crate::transport::dns::resolver::Balance::parse(&self.balance).unwrap_or_default()
+    pub fn balance(&self) -> crate::transport::dns::list::Balance {
+        crate::transport::dns::list::Balance::parse(&self.balance).unwrap_or_default()
     }
 
     /// The fallback server, port 53 if left off.
@@ -469,14 +469,14 @@ impl DnsConfig {
     }
 
     /// What the dialing side's resolver pool is set to.
-    pub fn pool_config(&self) -> Result<crate::transport::dns::resolver::PoolConfig> {
+    pub fn pool_config(&self) -> Result<crate::transport::dns::list::PoolConfig> {
         let domains = self.domain.parse()?;
         let ceiling = domains
             .iter()
             .map(crate::transport::dns::wire::Domain::query_capacity)
             .min()
             .unwrap_or(0);
-        Ok(crate::transport::dns::resolver::PoolConfig {
+        Ok(crate::transport::dns::list::PoolConfig {
             domains,
             resolvers: self.resolver_addrs()?,
             duplicate: usize::from(self.duplicate),
@@ -1854,10 +1854,10 @@ impl Config {
         if !(1..=8).contains(&d.setup_duplicate) {
             bail!("[tunnel.dns] setup_duplicate must be 1 to 8");
         }
-        if crate::transport::dns::resolver::Balance::parse(&d.balance).is_none() {
+        if crate::transport::dns::list::Balance::parse(&d.balance).is_none() {
             bail!(
                 "[tunnel.dns] balance must be one of {}",
-                crate::transport::dns::resolver::Balance::NAMES.join(", ")
+                crate::transport::dns::list::Balance::NAMES.join(", ")
             );
         }
         let ceiling = domains
@@ -3208,10 +3208,7 @@ keepalive_secs = 1
         let d = c.tunnel.dns.as_ref().unwrap();
         assert_eq!((d.duplicate, d.setup_duplicate), (2, 3));
         assert!(d.scan && !d.base64);
-        assert_eq!(
-            d.balance(),
-            crate::transport::dns::resolver::Balance::Hybrid
-        );
+        assert_eq!(d.balance(), crate::transport::dns::list::Balance::Hybrid);
         let addrs = d.resolver_addrs().unwrap();
         assert_eq!(addrs.len(), 5);
         assert_eq!(addrs[0], "8.8.8.8:53".parse().unwrap());

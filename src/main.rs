@@ -134,6 +134,7 @@ fn main() -> Result<()> {
 
 /// `wormhole dns-scan`: tests every resolver of the config through its listener and prints
 /// the ones that answered.
+#[cfg(feature = "kcp")]
 fn dns_scan(config: &Config, save: Option<PathBuf>) -> Result<()> {
     use wormhole::transport::dns::resolver;
 
@@ -180,6 +181,11 @@ fn dns_scan(config: &Config, save: Option<PathBuf>) -> Result<()> {
         );
     }
     Ok(())
+}
+
+#[cfg(not(feature = "kcp"))]
+fn dns_scan(_: &Config, _: Option<PathBuf>) -> Result<()> {
+    bail!("this build has no KCP, which dns through resolvers runs on")
 }
 
 /// `wormhole check`: validates a config (a file, or standard input for `-`) and prints its

@@ -603,15 +603,15 @@ impl PairRequest {
         }
         let entries = resolvers
             .iter()
-            .flat_map(|r| wormhole::transport::dns::resolver::resolver_entries(r));
-        if wormhole::transport::dns::resolver::expand_resolvers(entries).is_err() {
+            .flat_map(|r| wormhole::transport::dns::list::resolver_entries(r));
+        if wormhole::transport::dns::list::expand_resolvers(entries).is_err() {
             bail!("bad_dns_resolver");
         }
         if self.dns_duplicate.is_some_and(|d| !(1..=4).contains(&d)) {
             bail!("bad_dns_duplicate");
         }
         if let Some(b) = self.dns_balance.as_deref().filter(|b| !b.is_empty()) {
-            if wormhole::transport::dns::resolver::Balance::parse(b).is_none() {
+            if wormhole::transport::dns::list::Balance::parse(b).is_none() {
                 bail!("bad_dns_balance");
             }
         }
