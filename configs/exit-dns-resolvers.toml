@@ -11,7 +11,8 @@ listen = "0.0.0.0:53"
 token = "CHANGE-ME-run-wormhole-token"
 
 [tunnel.dns]
-domain = "t.example.com"
+domain = "t.example.com"        # the same domain(s) as the entry
+# fallback = "1.1.1.1"          # answer other names through this server (else refused)
 
 [log]
 level = "info"

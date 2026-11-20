@@ -897,6 +897,8 @@ mod tests {
             dns_domain: None,
             dns_resolvers: None,
             dns_duplicate: None,
+            dns_balance: None,
+            dns_base64: None,
             name: "t".into(),
             entry: "aaa".into(),
             exit: "bbb".into(),

@@ -106,6 +106,18 @@ export interface TransportShare {
   rtt_ms: number | null;
 }
 
+export interface DnsResolverInfo {
+  addr: string;
+  /** active (in use), testing, off (set aside after losses) or dead (failed its test). */
+  state: string;
+  rtt_ms: number | null;
+  sent: number;
+  answered: number;
+  /** Query data and answer payload it passes, in bytes. */
+  upload: number;
+  download: number;
+}
+
 export interface TunnelStatus {
   /** Seconds the daemon has run. */
   uptime_secs?: number;
@@ -124,6 +136,8 @@ export interface TunnelStatus {
     full?: number;
     /** An auto or multi tunnel (1.2.2): each transport's sessions and what went over it. */
     by_transport?: TransportShare[];
+    /** dns through resolvers, the dialing side (1.2.5): each resolver and how it does. */
+    dns_resolvers?: DnsResolverInfo[];
   };
   totals: { bytes_up: number; bytes_down: number; tcp_open: number; udp_flows: number };
   forwards?: { listen: string; open_failures: number; refused_per_ip?: number }[];

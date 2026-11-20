@@ -5,14 +5,26 @@
 - **DNS through resolvers.** `transport = "dns"` with `[tunnel.dns]` goes through ordinary
   recursive resolvers to a listener that is the authoritative server of a domain delegated
   to it: for a shutdown where only DNS still gets out. The dialing side puts the packets in
-  the names of TXT queries (base32, in fragments) and keeps a few queries waiting at the
-  listener, which answers with the packets it has; it spreads its queries over the resolvers
-  that answer best, leaves out the ones that stop for a while, and with `duplicate` sends
-  each packet through several. KCP, the token's sealing and mux work above it as on `kcp`.
-  In the panel: *DNS*, then *Through DNS resolvers*. Sample configs:
-  `configs/entry-dns-resolvers.toml`, `configs/exit-dns-resolvers.toml`. Guide:
-  [Transports](docs/transports.md). Written for Wormhole from scratch, after the idea of
-  resolver tunnels such as MasterDnsVPN and dnstt.
+  the names of TXT queries (base32, in fragments) and keeps queries waiting at the listener,
+  which answers with the packets it has; KCP, the token's sealing and mux work above it as
+  on `kcp`. Written for Wormhole from scratch, after the idea of resolver tunnels such as
+  MasterDnsVPN and dnstt.
+  - **Any number of resolvers:** `IP`, `IP:port`, `CIDR` or `CIDR:port`, and a
+    `resolvers_file`. Each is **tested first** through the listener — does it answer, and
+    the largest query (upload) and answer (download) it passes — and the ones that pass
+    are used, each at its own sizes; `scan_save` writes them to a file, and
+    `wormhole dns-scan` runs the test by hand.
+  - **Eight ways to pick** the next resolver (`balance`: `hybrid` by default,
+    `round-robin`, `random`, `least-loss`, `lowest-latency`, `loss-then-latency`,
+    `least-loss-top-random`, `least-loss-top-round-robin`). One that stops answering is
+    set aside and tested again later; the panel's tunnel page and the status show each.
+  - Copies of each packet through several resolvers (`duplicate`, more while a connection
+    starts with `setup_duplicate`), answers as large as each resolver takes, in pieces both
+    ways, polls that thin out as the connection idles, several domains, base64 answers, and
+    on the listening side a `fallback` server for other names.
+  - In the panel: *DNS*, then *Through DNS resolvers*. Sample configs:
+    `configs/entry-dns-resolvers.toml`, `configs/exit-dns-resolvers.toml`. Guide:
+    [Transports](docs/transports.md).
 
 ## 1.2.4 - 2026-11-18
 

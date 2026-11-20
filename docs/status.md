@@ -120,6 +120,7 @@ Readers must ignore fields they do not know: later versions add fields and raise
 | `streams`, `streams_max` | with mux: streams open over all live sessions, and how many those sessions take (`mux.max_streams` each; a session that is being replaced takes none). `null` without mux |
 | `full` | new connections and flows that failed because every session was full (entry side) |
 | `by_transport` | an `auto` or `multi` tunnel (1.2.2): one entry per transport it has run over — `transport`, its live `sessions`, `streams_open` now and `streams_total` since the tunnel started, the payload `bytes_sent` and `bytes_received` by this side, and its `rtt_ms`. Left out for the other transports. The panel shows it on the tunnel's page, *By transport* |
+| `dns_resolvers` | `dns` through resolvers, the dialing side (1.2.5): one entry per resolver, the ones in use first (at most 64) — `addr`, `state` (`active`, `testing`, `off`: set aside after losses, `dead`: did not pass its test; the last two are tested again now and then), `rtt_ms`, queries `sent` and `answered`, and the `upload` and `download` bytes it passes. Left out otherwise. The panel shows it on the tunnel's page, *DNS resolvers* |
 
 ### `totals` and `forwards`
 

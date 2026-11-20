@@ -135,12 +135,51 @@ pub struct KcpParams {
     dns: Option<Arc<DnsPath>>,
 }
 
-/// The resolver path of `dns`: the domain, and on the dialing side the resolvers.
-#[derive(Debug)]
+/// The resolver path of `dns`: the domains; on the dialing side the resolvers (one pool,
+/// tested once, for all the tunnel's connections), on the listening side the fallback.
 pub(crate) struct DnsPath {
-    pub(crate) domain: crate::transport::dns::wire::Domain,
-    pub(crate) resolvers: Vec<SocketAddr>,
-    pub(crate) duplicate: usize,
+    pub(crate) domains: Vec<crate::transport::dns::wire::Domain>,
+    pub(crate) pool: Option<crate::transport::dns::resolver::PoolConfig>,
+    pub(crate) fallback: Option<SocketAddr>,
+    shared: tokio::sync::OnceCell<Arc<crate::transport::dns::resolver::Pool>>,
+}
+
+impl DnsPath {
+    pub(crate) fn new(
+        domains: Vec<crate::transport::dns::wire::Domain>,
+        pool: Option<crate::transport::dns::resolver::PoolConfig>,
+        fallback: Option<SocketAddr>,
+    ) -> Self {
+        Self {
+            domains,
+            pool: pool.filter(|p| !p.resolvers.is_empty()),
+            fallback,
+            shared: tokio::sync::OnceCell::new(),
+        }
+    }
+
+    /// The dialing side's resolver pool, started (and its scan begun) on first use.
+    pub(crate) async fn pool(&self) -> Option<Arc<crate::transport::dns::resolver::Pool>> {
+        let cfg = self.pool.as_ref()?;
+        let pool = self
+            .shared
+            .get_or_init(|| async { crate::transport::dns::resolver::Pool::start(cfg.clone()) })
+            .await;
+        Some(pool.clone())
+    }
+}
+
+impl std::fmt::Debug for DnsPath {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DnsPath")
+            .field("domains", &self.domains)
+            .field(
+                "resolvers",
+                &self.pool.as_ref().map_or(0, |p| p.resolvers.len()),
+            )
+            .field("fallback", &self.fallback)
+            .finish()
+    }
 }
 
 /// The forged addresses a `spoof` carrier needs.
@@ -231,11 +270,11 @@ impl KcpParams {
     pub fn new_dns(tunnel: &TunnelConfig, config: KcpConfig) -> Self {
         // Checked by the config's validation; a bad value here leaves the direct path.
         let dns = tunnel.dns.as_ref().and_then(|d| {
-            Some(Arc::new(DnsPath {
-                domain: crate::transport::dns::wire::Domain::parse(&d.domain).ok()?,
-                resolvers: d.resolver_addrs().ok()?,
-                duplicate: usize::from(d.duplicate),
-            }))
+            Some(Arc::new(DnsPath::new(
+                d.domain.parse().ok()?,
+                d.pool_config().ok(),
+                d.fallback_addr().ok()?,
+            )))
         });
         Self {
             config,
@@ -1406,14 +1445,13 @@ impl KcpDialer {
 
     pub async fn dial(&self) -> io::Result<KcpStream> {
         // Through resolvers: the remote is not dialed, the resolvers are.
-        if let Some(dns) = self
-            .settings
-            .dns
-            .clone()
-            .filter(|d| !d.resolvers.is_empty())
-        {
-            let socket = PacketSocket::dns_resolvers(&dns, self.settings.socket_buffer).await?;
-            return self.start(socket, dns.resolvers[0]);
+        if let Some(pool) = match &self.settings.dns {
+            Some(dns) => dns.pool().await,
+            None => None,
+        } {
+            let socket = PacketSocket::dns_resolvers(pool, self.settings.socket_buffer).await?;
+            let peer = socket.peer_addr().unwrap_or_else(|| socket.local_addr());
+            return self.start(socket, peer);
         }
         let mut addresses = tokio::net::lookup_host(&self.remote).await?;
         let peer = if self.settings.ipv4_only() {

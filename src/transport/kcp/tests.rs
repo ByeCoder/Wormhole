@@ -363,11 +363,25 @@ fn params_dns_path(key: u8, resolvers: Vec<SocketAddr>) -> KcpParams {
         key: [key; 32],
         carrier: CarrierKind::Dns,
         spoof: None,
-        dns: Some(Arc::new(DnsPath {
-            domain: crate::transport::dns::wire::Domain::parse("t.example.com").unwrap(),
-            resolvers,
-            duplicate: 2,
-        })),
+        dns: Some(Arc::new(DnsPath::new(
+            vec![crate::transport::dns::wire::Domain::parse("t.example.com").unwrap()],
+            Some(crate::transport::dns::resolver::PoolConfig {
+                domains: vec![crate::transport::dns::wire::Domain::parse("t.example.com").unwrap()],
+                resolvers,
+                duplicate: 2,
+                setup_duplicate: 3,
+                balance: crate::transport::dns::resolver::Balance::Hybrid,
+                base64: false,
+                scan: true,
+                upload: (40, 400),
+                download: (100, 1200),
+                timeout: Duration::from_millis(500),
+                retries: 1,
+                parallel: 8,
+                save: None,
+            }),
+            None,
+        ))),
     }
 }
 

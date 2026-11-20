@@ -19,9 +19,18 @@ remote = "EXIT_SERVER_IP:53"    # the exit; the traffic itself goes through the 
 token = "CHANGE-ME-run-wormhole-token"
 
 [tunnel.dns]
-domain = "t.example.com"
-resolvers = ["8.8.8.8", "1.1.1.1", "9.9.9.9"]   # in a shutdown: the ones that answer here
+domain = "t.example.com"                        # or several: ["t.example.com", "t.example.net"]
+# IP, IP:port, CIDR or CIDR:port. Each is tested first; the ones that answer are used and
+# the ones that stop are set aside. In a shutdown: the ones that may answer here (the data
+# centre's, the ISP's, a range of them).
+resolvers = ["8.8.8.8", "1.1.1.1", "9.9.9.9"]
+# resolvers_file = "/etc/wormhole/resolvers.txt"   # more, one or more per line
 duplicate = 2                                   # each packet through two resolvers
+setup_duplicate = 3                             # three while a connection starts
+balance = "hybrid"                              # round trip weighed up by losses
+# base64 = true                                 # if a resolver mangles binary answers
+# scan_save = "/var/lib/wormhole/resolvers-ok.txt"   # the ones that passed the test
+# `wormhole dns-scan -c this-file` tests the resolvers by hand.
 
 [[forward]]
 listen = "0.0.0.0:443"

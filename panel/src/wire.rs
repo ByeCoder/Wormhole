@@ -436,14 +436,32 @@ impl SpoofSpec {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DnsSpec {
-    /// The domain delegated to the listening side.
+    /// The domain delegated to the listening side; several are separated by commas.
     pub domain: String,
-    /// The dialing side: the resolvers it queries (empty on the listening side).
+    /// The dialing side: the resolvers it queries, `IP`, `IP:port`, `CIDR` or `CIDR:port`
+    /// (empty on the listening side). Each is tested; the ones that answer are used.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub resolvers: Vec<String>,
     /// The dialing side: copies of each packet, through as many resolvers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duplicate: Option<u8>,
+    /// The dialing side: how the next resolver is picked (`hybrid` if left out).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub balance: Option<String>,
+    /// The dialing side: answers in base64, for resolvers that mangle binary TXT data.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub base64: bool,
+}
+
+impl DnsSpec {
+    /// The domains, one per comma-separated item.
+    pub fn domains(&self) -> Vec<&str> {
+        self.domain
+            .split(',')
+            .map(str::trim)
+            .filter(|d| !d.is_empty())
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

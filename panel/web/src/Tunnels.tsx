@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { ApiError, api, isPrivatePath } from "./api";
-import type { ServerInfo, TransportShare } from "./api";
+import type { DnsResolverInfo, ServerInfo, TransportShare } from "./api";
 import { pairTunnels, rateParts } from "./derive";
 import type { Tunnel, TunnelState } from "./derive";
 import { useApp } from "./store";
@@ -398,6 +398,42 @@ function TransportShares({ shares }: { shares: TransportShare[] }) {
   );
 }
 
+function DnsResolverTable({ resolvers }: { resolvers: DnsResolverInfo[] }) {
+  const { t, num } = useApp();
+  return (
+    <table className="plain-table">
+      <thead>
+        <tr>
+          <th>{t("td.dns.addr")}</th>
+          <th>{t("td.dns.state")}</th>
+          <th>{t("tun.rtt")}</th>
+          <th>{t("td.dns.answered")}</th>
+          <th>{t("td.dns.sizes")}</th>
+        </tr>
+      </thead>
+      <tbody>
+        {resolvers.map((r) => (
+          <tr key={r.addr} className={r.state === "active" ? undefined : "is-down"}>
+            <td className="mono" dir="ltr">
+              {r.addr}
+            </td>
+            <td>
+              <span className="tag">{t(`td.dns.st.${r.state}`)}</span>
+            </td>
+            <td className="mono">{r.rtt_ms != null ? `${num(r.rtt_ms, 0)} ms` : "—"}</td>
+            <td className="mono">
+              {num(r.answered)} / {num(r.sent)}
+            </td>
+            <td className="mono" dir="ltr">
+              ↑{num(r.upload)} ↓{num(r.download)} B
+            </td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
 function TunnelPage({
   tunnel,
   servers,
@@ -635,6 +671,19 @@ function TunnelPage({
         {(status ?? tunnel.exit?.tunnel.status)?.peer.by_transport?.length ? (
           <Card title={t("td.shares")} sub={t("td.sharesSub")} flush>
             <TransportShares shares={(status ?? tunnel.exit!.tunnel.status!).peer.by_transport!} />
+          </Card>
+        ) : null}
+
+        {status?.peer.dns_resolvers?.length ? (
+          <Card
+            title={t("td.dns.card")}
+            sub={t("td.dns.sub", {
+              active: num(status.peer.dns_resolvers.filter((r) => r.state === "active").length),
+              total: num(status.peer.dns_resolvers.length),
+            })}
+            flush
+          >
+            <DnsResolverTable resolvers={status.peer.dns_resolvers} />
           </Card>
         ) : null}
 

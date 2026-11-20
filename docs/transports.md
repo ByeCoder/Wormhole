@@ -240,7 +240,10 @@ When a shutdown leaves only DNS working, the two servers may not reach each othe
 but the inside server can still ask a DNS resolver, and the resolver can still ask the
 outside world. With `[tunnel.dns]`, `dns` goes that way: the dialing side sends its packets
 as **DNS queries to ordinary resolvers**, and they pass them on to the listening side as
-the **authoritative server of a domain** delegated to it.
+the **authoritative server of a domain** delegated to it. Give it as many resolvers as you
+like — single addresses, whole ranges, or a file of them: it **tests every one** first,
+**uses the ones that answer**, spreads the queries over them, and sets aside the ones that
+stop.
 
 ```toml
 # the listening side (outside): answers for the domain on UDP 53
@@ -248,16 +251,23 @@ the **authoritative server of a domain** delegated to it.
 transport = "dns"
 listen = "0.0.0.0:53"
 [tunnel.dns]
-domain = "t.example.com"
+domain = "t.example.com"            # or a list: ["t.example.com", "t.example.net"]
+# fallback = "127.0.0.53"           # pass other names on to this DNS server (else refused)
 
-# the dialing side (inside): queries go to these resolvers
+# the dialing side (inside): queries go through these resolvers
 [tunnel]
 transport = "dns"
-remote = "203.0.113.9:53"          # the other server (for the status; traffic goes via resolvers)
+remote = "203.0.113.9:53"           # the other server (for the status; traffic goes via resolvers)
 [tunnel.dns]
 domain = "t.example.com"
-resolvers = ["8.8.8.8", "1.1.1.1", "9.9.9.9"]
-duplicate = 2                       # 1–4; each packet through as many resolvers (default 2)
+resolvers = ["8.8.8.8", "1.1.1.1:53", "5.160.0.0/24", "[2001:db8::/120]:53"]
+resolvers_file = "/etc/wormhole/resolvers.txt"   # more, one or more per line, # comments
+duplicate = 2                       # 1–4: each packet through as many resolvers
+setup_duplicate = 3                 # 1–8: the same for a connection's first seconds
+balance = "hybrid"                  # how the next resolver is picked (below)
+base64 = false                      # answers in base64, for resolvers that mangle binary
+scan = true                         # test every resolver first
+scan_save = "/var/lib/wormhole/resolvers-ok.txt"  # the ones that passed, quickest first
 ```
 
 **The domain.** At your DNS provider, give the listening server a name and delegate a
@@ -268,42 +278,90 @@ ns.example.com.  A   203.0.113.9        ; the listening server
 t.example.com.   NS  ns.example.com.
 ```
 
+Several domains (each delegated the same way) spread the queries over more names; both
+sides list the same ones.
+
+**The resolvers.** Each entry is `IP`, `IP:port`, `CIDR` or `CIDR:port` (port 53 if left
+off; IPv6 with a port in brackets). A range stands for every address in it — IPv4 `/16` to
+`/32`, IPv6 `/112` to `/128` — so `5.160.0.0/24` is 254 resolvers to try. Repeats count
+once; up to 65 536 in all.
+
+**The test (scan).** When the tunnel starts, every resolver is tested through the listener
+itself, 64 at a time (`scan_parallel`). A test is a small query whose answer must come back
+whole with the token it carried; then the largest query name it passes (**upload**) and the
+largest answer it brings back (**download**) are found by halving, each between
+`min_upload`/`max_upload` (default 40 to all the domain leaves room for) and
+`min_download`/`max_download` (default 100 to 1200). Each probe waits `scan_timeout_ms`
+(1500) and is sent again `scan_retries` times (1). The tunnel starts as soon as the first
+resolver passes; the rest join as they pass. The log sums it up (`dns: resolvers tested
+answering=… upload=… download=…`), and with `scan_save` the ones that passed are written
+to a file that `resolvers_file` can read back. `scan = false` skips the test and uses all
+of them at once, at the largest sizes.
+
+`wormhole dns-scan -c config.toml [--save file]` runs the same test by hand on the dialing
+side and lists what answered, with the sizes and round trips — handy to sort a long list
+before a shutdown.
+
+**Picking resolvers (`balance`).**
+
+| `balance` | Each query goes to |
+|---|---|
+| `hybrid` (default) | the shortest round trip, weighed up by losses |
+| `round-robin` | each in turn |
+| `random` | a random one |
+| `least-loss` | the fewest losses |
+| `lowest-latency` | the shortest round trip |
+| `loss-then-latency` | the fewest losses, then the shortest round trip |
+| `least-loss-top-random` | a random one of those within 5 % of the fewest losses |
+| `least-loss-top-round-robin` | those, in turn |
+
+The ones that go by score send a few queries elsewhere so the others' figures stay current.
+
+**Set aside and back.** A resolver that loses four queries in a row, or answers nothing for
+30 seconds, is set aside, and tested again after 20 s (doubling up to 10 minutes each time
+it fails again); one that failed its first test is tested again the same way. When it
+passes, it is used again. The tunnel page in the panel and `wormhole status --json`
+(`peer.dns_resolvers`) show each resolver: in use, set aside or not answering, its round
+trip, how many queries it answered, and its sizes.
+
 **How it works.**
 
-- **Up:** a packet is split into fragments of about 130 bytes (less with a long domain),
-  each base32 in the name of a TXT query (`<data>.t.example.com`) — base32, because
-  resolvers may change the case of a name. A counter in every name keeps any two from
-  being the same, so nothing is answered from a cache.
-- **Down:** the listener can only answer what it is asked, so the dialing side keeps a few
-  queries waiting there (eight while data moves, one when idle). The listener holds each
-  up to 350 ms and answers it with the packets it has for that session, in a TXT record,
-  or with nothing. An answer that says more is waiting brings more queries at once.
-- **Many resolvers.** Each query goes to the resolver with the best round trip and fewest
-  losses; a few go to the others, so their figures stay current. One that loses four
-  queries in a row is left out for 15 s, longer if it fails again (up to 4 minutes), then
-  tried again. With `duplicate`, each packet goes through that many different resolvers:
-  on a lossy path this saves the wait for a resend, at the cost of more queries.
+- **Up:** a packet is split into fragments as large as the picked resolvers pass (their
+  upload size), each base32 in the name of a TXT query (`<data>.t.example.com`) — base32,
+  because resolvers may change the case of a name. A counter in every name keeps any two
+  from being the same, so nothing is answered from a cache. With `duplicate`, the packet
+  goes through that many different resolvers, split alike, and the listener takes it once;
+  the first seconds of each connection (its handshake) go with `setup_duplicate` copies.
+- **Down:** the listener can only answer what it is asked, so the dialing side keeps
+  queries waiting there: eight while data moves, then one, then one every 0.75 s, 2 s and
+  finally 15 s as the connection idles (any data brings them back at once). The listener
+  holds each up to 350 ms and answers it with as much of the session's packets as **that
+  query's resolver** takes (its download size), in pieces when a packet is larger; an
+  answer that says more is waiting brings more queries at once.
 - **Above it, the same as `kcp`:** KCP resends what is lost, packets are sealed with the
   token, and mux carries many connections in one session.
 
 **What to expect.**
 
-- **Slow:** tens to a few hundred KB/s, depending on the resolvers. It is for when nothing
-  else gets out.
-- **Small packets:** a packet must fit one answer within the 1232-byte EDNS0 buffer, so the
-  KCP MTU defaults to 600 here (at most 903), and a long domain leaves less room for the
-  query names (`wormhole check` says so).
+- **Slow:** tens to a few hundred KB/s, depending on the resolvers — more of them, and
+  better ones, help. It is for when nothing else gets out.
+- **MTU:** packets go in pieces both ways, so the KCP MTU is only kept moderate: 600 by
+  default here (at most 1400), so a packet takes fewer queries. A very long domain leaves
+  too little room for data (`wormhole check` says so).
 - **Port 53:** the listening side binds UDP 53 (root, or `CAP_NET_BIND_SERVICE`), where
-  resolvers ask. It answers other names of the domain with no records and other domains
-  with REFUSED.
+  resolvers ask; on a server with `systemd-resolved` listening on 127.0.0.53:53, bind the
+  public address rather than `0.0.0.0`. It answers other names of its domains with no
+  records, and other domains with REFUSED — or passes them on to `fallback`.
 - **Which side dials:** the side inside must dial, so in a shutdown use `mode = "direct"`
   with the entry inside.
-- **Resolvers:** the defaults are public ones. In a shutdown, put the ones that still work
-  from the inside server (its data centre's or ISP's); `8.8.8.8` may not answer there.
+- **Resolvers:** the defaults are public ones. In a shutdown, put the ones that may still
+  work from the inside server — its data centre's or ISP's, or a range of them — and let
+  the test find which do.
 
-In the panel: pick *DNS*, then *Through DNS resolvers*, and fill in the domain and the
-resolvers; the port becomes 53. Needs 1.2.5 on both servers. Sample configs:
-`configs/entry-dns-resolvers.toml`, `configs/exit-dns-resolvers.toml`.
+In the panel: pick *DNS*, then *Through DNS resolvers*, and fill in the domain(s), the
+resolvers (addresses or ranges), the copies, how to pick resolvers and base64; the port
+becomes 53. The tunnel page shows the resolvers. Needs 1.2.5 on both servers. Sample
+configs: `configs/entry-dns-resolvers.toml`, `configs/exit-dns-resolvers.toml`.
 
 ## `grpc`
 
