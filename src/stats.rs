@@ -319,7 +319,20 @@ impl Peer {
             streams: mux.then_some(streams),
             streams_max: (mux && self.max_streams > 0).then_some(open_sessions * self.max_streams),
             full: self.full.load(Relaxed),
+            dns_resolvers: dns_resolvers(),
         }
+    }
+}
+
+/// The resolvers of a `dns` tunnel through resolvers (none without KCP).
+fn dns_resolvers() -> Vec<DnsResolverInfo> {
+    #[cfg(feature = "kcp")]
+    {
+        crate::transport::dns::resolver::snapshot(64)
+    }
+    #[cfg(not(feature = "kcp"))]
+    {
+        Vec::new()
     }
 }
 
@@ -615,6 +628,26 @@ pub struct PeerStatus {
     /// the tunnel started; empty for the others.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub by_transport: Vec<TransportShare>,
+    /// `dns` through resolvers, on the dialing side: the resolvers and how each is doing,
+    /// the ones in use first; empty otherwise.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dns_resolvers: Vec<DnsResolverInfo>,
+}
+
+/// One resolver of a `dns` tunnel, in [`PeerStatus::dns_resolvers`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DnsResolverInfo {
+    pub addr: String,
+    /// `active` (in use), `testing`, `off` (set aside after losses) or `dead` (did not
+    /// pass its test); the last two are tested again now and then.
+    pub state: String,
+    pub rtt_ms: Option<f64>,
+    /// Queries sent through it, and answered.
+    pub sent: u64,
+    pub answered: u64,
+    /// The query data and answer payload it passes, in bytes.
+    pub upload: u64,
+    pub download: u64,
 }
 
 /// One transport of an `auto` or `multi` tunnel, in [`PeerStatus::by_transport`].

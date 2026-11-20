@@ -609,6 +609,7 @@ mod tests {
                 streams_max: None,
                 full: 0,
                 by_transport: Vec::new(),
+                dns_resolvers: Vec::new(),
             },
             totals: Totals {
                 bytes_up: 0,

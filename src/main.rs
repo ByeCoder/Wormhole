@@ -80,6 +80,16 @@ enum Command {
         #[arg(long)]
         no_udp: bool,
     },
+    /// Test the resolvers of a `dns` tunnel's dialing side (`[tunnel.dns]`) through its
+    /// listener, and list the ones that answer with the sizes they pass, quickest first.
+    /// The listener must be up; the tunnel itself need not be.
+    DnsScan {
+        #[arg(short, long, default_value = "/etc/wormhole/config.toml")]
+        config: PathBuf,
+        /// Also write the list to this file, in the form `resolvers_file` reads.
+        #[arg(long)]
+        save: Option<PathBuf>,
+    },
 }
 
 fn main() -> Result<()> {
@@ -118,7 +128,64 @@ fn main() -> Result<()> {
             };
             speedtest(&Config::load(&config)?, options)
         }
+        Command::DnsScan { config, save } => dns_scan(&Config::load(&config)?, save),
     }
+}
+
+/// `wormhole dns-scan`: tests every resolver of the config through its listener and prints
+/// the ones that answered.
+#[cfg(feature = "kcp")]
+fn dns_scan(config: &Config, save: Option<PathBuf>) -> Result<()> {
+    use wormhole::transport::dns::resolver;
+
+    let Some(dns) = config.tunnel.dns.as_ref().filter(|_| !config.is_acceptor()) else {
+        bail!("dns-scan needs the dialing side of a dns tunnel with [tunnel.dns] resolvers");
+    };
+    let mut cfg = dns.pool_config()?;
+    cfg.scan = true;
+    cfg.save = None;
+    let total = cfg.resolvers.len();
+    println!(
+        "testing {total} resolver{} through {} ...",
+        if total == 1 { "" } else { "s" },
+        dns.domain
+    );
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    let answering = runtime.block_on(async {
+        let pool = resolver::Pool::idle(cfg);
+        pool.scan_now().await;
+        pool.answering()
+    });
+    println!(
+        "{} of {total} answered{}",
+        answering.len(),
+        if answering.is_empty() { "" } else { ":" }
+    );
+    for (addr, up, down, rtt) in &answering {
+        println!(
+            "  {addr:<44} up {up:>4} B  down {down:>4} B  {:>5} ms",
+            rtt.map_or(0, |r| r.round() as u64)
+        );
+    }
+    if let Some(path) = save {
+        std::fs::write(&path, resolver::scan_report(&answering))
+            .with_context(|| format!("writing {}", path.display()))?;
+        println!("saved to {}", path.display());
+    }
+    if answering.is_empty() {
+        bail!(
+            "no resolver brought an answer back: check that the domain is delegated to the \
+             listener (its NS record) and that the listener is up on port 53"
+        );
+    }
+    Ok(())
+}
+
+#[cfg(not(feature = "kcp"))]
+fn dns_scan(_: &Config, _: Option<PathBuf>) -> Result<()> {
+    bail!("this build has no KCP, which dns through resolvers runs on")
 }
 
 /// `wormhole check`: validates a config (a file, or standard input for `-`) and prints its
@@ -395,12 +462,16 @@ fn print_summary(config: &Config) {
                 dns.domain
             );
         } else {
+            let count = dns.resolver_addrs().map_or(0, |r| r.len());
             println!(
-                "  dns       : through the resolvers {} to {} ({} cop{} of each packet)",
-                dns.resolvers.join(", "),
+                "  dns       : through {count} resolver{} to {} ({} cop{} of each packet, \
+                 {}{})",
+                if count == 1 { "" } else { "s" },
                 dns.domain,
                 dns.duplicate,
-                if dns.duplicate == 1 { "y" } else { "ies" }
+                if dns.duplicate == 1 { "y" } else { "ies" },
+                dns.balance,
+                if dns.scan { ", tested first" } else { "" }
             );
         }
     }

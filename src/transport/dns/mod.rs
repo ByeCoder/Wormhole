@@ -14,6 +14,7 @@
 //! to a listener that is the authoritative server of `[tunnel.dns] domain` (see
 //! [`resolver`]): slower, but it gets out where only DNS does.
 
+pub mod list;
 pub mod packet;
 #[cfg(feature = "kcp")]
 pub mod resolver;

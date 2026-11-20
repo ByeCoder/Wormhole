@@ -297,36 +297,203 @@ pub struct ShadowtlsConfig {
 #[serde(deny_unknown_fields)]
 pub struct DnsConfig {
     /// The domain delegated to the listening side (an NS record pointing at it), e.g.
-    /// `t.example.com`. Both sides set the same one: the listener answers for it as its
-    /// authoritative server, the dialer puts its data in names under it.
-    pub domain: String,
-    /// The dialing side: the resolvers to send queries to, `IP` or `IP:port` (53 if left
-    /// off). Spread over by how well each answers; one that stops is left out for a while.
+    /// `t.example.com`, or a list of such domains. Both sides set the same: the listener
+    /// answers for them as their authoritative server, the dialer puts its data in names
+    /// under them (spread over all of them).
+    pub domain: DnsDomains,
+    /// The dialing side: the resolvers to send queries through, each `IP`, `IP:port`,
+    /// `CIDR` or `CIDR:port` (port 53 if left off; a CIDR stands for every address in it).
+    /// Each is tested first; the ones that answer are used, by `balance`.
     #[serde(default)]
     pub resolvers: Vec<String>,
+    /// The dialing side: a file with more resolvers, in the same forms, one or more per
+    /// line (`#` starts a comment). Read when the tunnel starts.
+    pub resolvers_file: Option<PathBuf>,
     /// The dialing side: how many different resolvers each packet is sent through (1–4;
-    /// 2 by default, never more than there are resolvers). Resolver paths often lose
-    /// queries, and a copy through another resolver saves the wait for KCP's resend.
+    /// 2 by default). Resolver paths often lose queries, and a copy through another
+    /// resolver saves the wait for KCP's resend.
     #[serde(default = "default_duplicate")]
     pub duplicate: u8,
+    /// The same for the first seconds of each connection, while its handshake goes
+    /// (1–8; 3 by default, never fewer than `duplicate`).
+    #[serde(default = "default_setup_duplicate")]
+    pub setup_duplicate: u8,
+    /// The dialing side: how the next resolver is picked among those that answer:
+    /// `hybrid` (the default: round trip weighed up by losses), `round-robin`, `random`,
+    /// `least-loss`, `lowest-latency`, `loss-then-latency`, `least-loss-top-random` or
+    /// `least-loss-top-round-robin`.
+    #[serde(default = "default_balance")]
+    pub balance: String,
+    /// The dialing side: answers in base64 rather than raw bytes, for resolvers that
+    /// mangle binary TXT data (a quarter less per answer).
+    #[serde(default)]
+    pub base64: bool,
+    /// The dialing side: test every resolver when the tunnel starts (on by default).
+    /// Off: all are used at once, at the largest sizes.
+    #[serde(default = "default_true")]
+    pub scan: bool,
+    /// The bounds of the sizes tested, in bytes: query data (upload; the domain's room is
+    /// the most) and answer payload (download).
+    #[serde(default = "default_min_upload")]
+    pub min_upload: usize,
+    pub max_upload: Option<usize>,
+    #[serde(default = "default_min_download")]
+    pub min_download: usize,
+    #[serde(default = "default_max_download")]
+    pub max_download: usize,
+    /// How long one test query waits for its answer, how many times it is sent again,
+    /// and how many resolvers are tested at once.
+    #[serde(default = "default_scan_timeout_ms")]
+    pub scan_timeout_ms: u64,
+    #[serde(default = "default_scan_retries")]
+    pub scan_retries: u8,
+    #[serde(default = "default_scan_parallel")]
+    pub scan_parallel: usize,
+    /// Where to write the resolvers that passed, quickest first (a file
+    /// `resolvers_file` reads back).
+    pub scan_save: Option<PathBuf>,
+    /// The listening side: a DNS server to pass queries for other names on to (so the
+    /// listener answers them as a normal server would); unset: they are refused.
+    pub fallback: Option<String>,
 }
+
+/// One domain, or several.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(untagged)]
+pub enum DnsDomains {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl DnsDomains {
+    pub fn names(&self) -> Vec<&str> {
+        match self {
+            Self::One(d) => vec![d.as_str()],
+            Self::Many(ds) => ds.iter().map(String::as_str).collect(),
+        }
+    }
+
+    /// The domains, checked.
+    pub fn parse(&self) -> Result<Vec<crate::transport::dns::wire::Domain>> {
+        let names = self.names();
+        if names.is_empty() || names.len() > MAX_DNS_DOMAINS {
+            bail!("[tunnel.dns] domain: 1 to {MAX_DNS_DOMAINS} domains");
+        }
+        names
+            .iter()
+            .map(|d| {
+                crate::transport::dns::wire::Domain::parse(d)
+                    .map_err(|e| anyhow!("[tunnel.dns] domain: {e}"))
+            })
+            .collect()
+    }
+}
+
+impl std::fmt::Display for DnsDomains {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.names().join(", "))
+    }
+}
+
+const MAX_DNS_DOMAINS: usize = 16;
 
 fn default_duplicate() -> u8 {
     2
 }
 
+fn default_setup_duplicate() -> u8 {
+    3
+}
+
+fn default_balance() -> String {
+    "hybrid".into()
+}
+
+fn default_min_upload() -> usize {
+    40
+}
+
+fn default_min_download() -> usize {
+    100
+}
+
+fn default_max_download() -> usize {
+    1200
+}
+
+fn default_scan_timeout_ms() -> u64 {
+    1500
+}
+
+fn default_scan_retries() -> u8 {
+    1
+}
+
+fn default_scan_parallel() -> usize {
+    64
+}
+
 impl DnsConfig {
-    /// The resolvers as addresses.
+    /// The resolvers as addresses: the list, then the file's, ranges expanded.
     pub fn resolver_addrs(&self) -> Result<Vec<std::net::SocketAddr>> {
-        self.resolvers
+        use crate::transport::dns::list as resolver;
+        let file = match &self.resolvers_file {
+            Some(path) => std::fs::read_to_string(path).with_context(|| {
+                format!("[tunnel.dns] resolvers_file: reading {}", path.display())
+            })?,
+            None => String::new(),
+        };
+        let entries = self
+            .resolvers
             .iter()
-            .map(|r| {
-                let r = r.trim();
-                r.parse::<std::net::SocketAddr>()
-                    .or_else(|_| r.parse::<std::net::IpAddr>().map(|ip| (ip, 53).into()))
-                    .map_err(|_| anyhow!("[tunnel.dns] resolvers: {r:?} is not an IP or IP:port"))
-            })
-            .collect()
+            .flat_map(|r| resolver::resolver_entries(r))
+            .chain(resolver::resolver_entries(&file));
+        resolver::expand_resolvers(entries).map_err(|e| anyhow!("[tunnel.dns] resolvers: {e}"))
+    }
+
+    /// The balancing strategy (checked by validation; `hybrid` if not known).
+    pub fn balance(&self) -> crate::transport::dns::list::Balance {
+        crate::transport::dns::list::Balance::parse(&self.balance).unwrap_or_default()
+    }
+
+    /// The fallback server, port 53 if left off.
+    pub fn fallback_addr(&self) -> Result<Option<std::net::SocketAddr>> {
+        let Some(f) = &self.fallback else {
+            return Ok(None);
+        };
+        let f = f.trim();
+        f.parse::<std::net::SocketAddr>()
+            .or_else(|_| f.parse::<std::net::IpAddr>().map(|ip| (ip, 53).into()))
+            .map(Some)
+            .map_err(|_| anyhow!("[tunnel.dns] fallback: {f:?} is not an IP or IP:port"))
+    }
+
+    /// What the dialing side's resolver pool is set to.
+    pub fn pool_config(&self) -> Result<crate::transport::dns::list::PoolConfig> {
+        let domains = self.domain.parse()?;
+        let ceiling = domains
+            .iter()
+            .map(crate::transport::dns::wire::Domain::query_capacity)
+            .min()
+            .unwrap_or(0);
+        Ok(crate::transport::dns::list::PoolConfig {
+            domains,
+            resolvers: self.resolver_addrs()?,
+            duplicate: usize::from(self.duplicate),
+            setup_duplicate: usize::from(self.setup_duplicate.max(self.duplicate)),
+            balance: self.balance(),
+            base64: self.base64,
+            scan: self.scan,
+            upload: (
+                self.min_upload,
+                self.max_upload.unwrap_or(ceiling).min(ceiling),
+            ),
+            download: (self.min_download, self.max_download),
+            timeout: Duration::from_millis(self.scan_timeout_ms),
+            retries: usize::from(self.scan_retries),
+            parallel: self.scan_parallel,
+            save: self.scan_save.clone(),
+        })
     }
 }
 
@@ -1081,10 +1248,10 @@ const ICMP_MTU_FEC: usize = 1429;
 const DNS_MTU: usize = 1136;
 /// With FEC, 43 bytes are added instead of 30: 1136 - 13 = 1123.
 const DNS_MTU_FEC: usize = 1123;
-/// Through resolvers (`[tunnel.dns]`), a sealed packet must fit one TXT answer within the
-/// 1232-byte EDNS0 buffer after a question of the longest name: 931 bytes, so 903 of KCP.
-const RESOLVER_MTU_MAX: usize = 903;
-/// The default there: smaller, so a packet the dialing side sends takes fewer queries.
+/// Through resolvers (`[tunnel.dns]`) packets go in fragments both ways, so the cap is only
+/// what keeps a packet to a sensible number of queries.
+const RESOLVER_MTU_MAX: usize = 1400;
+/// The default there: smaller, so a packet takes fewer queries (and fewer can be lost).
 const RESOLVER_MTU: usize = 600;
 const KCP_FEC_DATA: std::ops::RangeInclusive<usize> = 1..=64;
 const KCP_FEC_PARITY: std::ops::RangeInclusive<usize> = 1..=32;
@@ -1612,7 +1779,7 @@ impl Config {
             if effective.mtu > max {
                 bail!(
                     "tunnel.kcp.mtu must be at most {max} bytes with [tunnel.dns] (each packet \
-                     must fit one DNS answer through a resolver)"
+                     goes in many DNS queries)"
                 );
             }
         } else if self.tunnel.transport == TransportKind::Dns {
@@ -1645,19 +1812,21 @@ impl Config {
         if self.tunnel.transport != TransportKind::Dns {
             bail!("[tunnel.dns] is only used with transport = \"dns\"");
         }
-        let domain = crate::transport::dns::wire::Domain::parse(&d.domain)
-            .map_err(|e| anyhow!("[tunnel.dns] domain: {e}"))?;
-        // A packet goes up in at most 15 query names: a long domain leaves less room.
+        let domains = d.domain.parse()?;
+        // A packet goes up in at most 255 query names: a long domain leaves less room.
         let kcp = self.kcp();
         let extra = 28 + if kcp.fec().is_some() { 13 } else { 0 };
-        let most = domain.fragment_capacity() * crate::transport::dns::wire::MAX_FRAGMENTS;
-        if kcp.mtu + extra > most {
-            bail!(
-                "[tunnel.dns] domain {:?} leaves room for packets of {} bytes at most: use a \
-                 shorter domain or a smaller tunnel.kcp.mtu",
-                d.domain,
-                most.saturating_sub(extra)
-            );
+        let wire = crate::transport::dns::wire::QUERY_HEADER;
+        for domain in &domains {
+            let room = domain.query_capacity().saturating_sub(wire);
+            let most = room * crate::transport::dns::wire::MAX_FRAGMENTS;
+            if kcp.mtu + extra > most || room < 28 {
+                bail!(
+                    "[tunnel.dns] domain {:?} leaves too little room for data: use a shorter \
+                     domain or a smaller tunnel.kcp.mtu",
+                    domain.name()
+                );
+            }
         }
         let resolvers = d.resolver_addrs()?;
         if self.is_acceptor() {
@@ -1667,14 +1836,56 @@ impl Config {
                      domain's server"
                 );
             }
-        } else if resolvers.is_empty() {
-            bail!(
-                "[tunnel.dns] needs resolvers on the dialing side, e.g. resolvers = [\"8.8.8.8\", \
-                 \"1.1.1.1\"]"
-            );
+            d.fallback_addr()?;
+        } else {
+            if resolvers.is_empty() {
+                bail!(
+                    "[tunnel.dns] needs resolvers on the dialing side, e.g. resolvers = \
+                     [\"8.8.8.8\", \"1.1.1.1\"]"
+                );
+            }
+            if d.fallback.is_some() {
+                bail!("[tunnel.dns] fallback is for the listening side");
+            }
         }
         if !(1..=4).contains(&d.duplicate) {
             bail!("[tunnel.dns] duplicate must be 1 to 4");
+        }
+        if !(1..=8).contains(&d.setup_duplicate) {
+            bail!("[tunnel.dns] setup_duplicate must be 1 to 8");
+        }
+        if crate::transport::dns::list::Balance::parse(&d.balance).is_none() {
+            bail!(
+                "[tunnel.dns] balance must be one of {}",
+                crate::transport::dns::list::Balance::NAMES.join(", ")
+            );
+        }
+        let ceiling = domains
+            .iter()
+            .map(|d| d.query_capacity())
+            .min()
+            .unwrap_or(0);
+        let max_upload = d.max_upload.unwrap_or(ceiling);
+        if d.min_upload < 24 || d.min_upload > max_upload || max_upload > ceiling {
+            bail!(
+                "[tunnel.dns] min_upload and max_upload must be 24 to {ceiling} bytes (what \
+                 the domain leaves room for), min_upload no more than max_upload"
+            );
+        }
+        if d.min_download < 16 || d.min_download > d.max_download || d.max_download > 2040 {
+            bail!(
+                "[tunnel.dns] min_download and max_download must be 16 to 2040 bytes, \
+                 min_download no more than max_download"
+            );
+        }
+        if !(100..=10_000).contains(&d.scan_timeout_ms) {
+            bail!("[tunnel.dns] scan_timeout_ms must be 100 to 10000");
+        }
+        if d.scan_retries > 5 {
+            bail!("[tunnel.dns] scan_retries must be 0 to 5");
+        }
+        if !(1..=1024).contains(&d.scan_parallel) {
+            bail!("[tunnel.dns] scan_parallel must be 1 to 1024");
         }
         Ok(())
     }
@@ -2991,28 +3202,138 @@ keepalive_secs = 1
 
     #[test]
     fn dns_through_resolvers_takes_a_domain_and_resolvers_on_the_dialing_side() {
-        let dialer = "[tunnel.dns]\ndomain = \"t.example.com\"\nresolvers = [\"8.8.8.8\", \"1.1.1.1:5353\", \"2001:4860:4860::8888\"]";
+        let dialer = "[tunnel.dns]\ndomain = \"t.example.com\"\nresolvers = [\"8.8.8.8\", \"1.1.1.1:5353\", \"2001:4860:4860::8888\", \"10.9.0.0/30\"]";
         let c = Config::parse(&with_transport("entry", "dns", dialer)).unwrap();
         assert!(c.dns_resolver_path());
         let d = c.tunnel.dns.as_ref().unwrap();
-        assert_eq!(d.duplicate, 2);
+        assert_eq!((d.duplicate, d.setup_duplicate), (2, 3));
+        assert!(d.scan && !d.base64);
+        assert_eq!(d.balance(), crate::transport::dns::list::Balance::Hybrid);
         let addrs = d.resolver_addrs().unwrap();
+        assert_eq!(addrs.len(), 5);
         assert_eq!(addrs[0], "8.8.8.8:53".parse().unwrap());
         assert_eq!(addrs[1].port(), 5353);
         assert!(addrs[2].is_ipv6());
-        // A packet must fit an answer: the smaller default MTU, and a cap.
+        assert_eq!(addrs[3], "10.9.0.1:53".parse().unwrap());
+        let pool = d.pool_config().unwrap();
+        assert_eq!(pool.upload.1, pool.upload_ceiling());
+        assert_eq!(pool.download, (100, 1200));
+        // The smaller default MTU, and a cap.
         assert_eq!(c.kcp().mtu, RESOLVER_MTU);
-        let listener = "[tunnel.dns]\ndomain = \"t.example.com\"";
-        Config::parse(&with_transport("exit", "dns", listener)).unwrap();
+        // Several domains, a list file, and the options.
+        let file =
+            std::env::temp_dir().join(format!("wormhole-resolvers-{}.txt", std::process::id()));
+        std::fs::write(
+            &file,
+            "9.9.9.9 # quad9\n149.112.112.112:53, 208.67.222.222\n",
+        )
+        .unwrap();
+        let many = format!(
+            "[tunnel.dns]\ndomain = [\"t.example.com\", \"u.example.net\"]\nresolvers_file = {:?}\nbalance = \"least-loss-top-random\"\nbase64 = true\nscan = false\nscan_save = \"/tmp/ok.txt\"",
+            file.display().to_string()
+        );
+        let c = Config::parse(&with_transport("entry", "dns", &many)).unwrap();
+        let d = c.tunnel.dns.as_ref().unwrap();
+        assert_eq!(d.domain.names(), ["t.example.com", "u.example.net"]);
+        assert_eq!(d.resolver_addrs().unwrap().len(), 3);
+        let pool = d.pool_config().unwrap();
+        assert_eq!(pool.domains.len(), 2);
+        assert!(pool.base64 && !pool.scan);
+        let _ = std::fs::remove_file(&file);
+        let listener = "[tunnel.dns]\ndomain = \"t.example.com\"\nfallback = \"127.0.0.53\"";
+        let c = Config::parse(&with_transport("exit", "dns", listener)).unwrap();
+        assert_eq!(
+            c.tunnel.dns.unwrap().fallback_addr().unwrap(),
+            Some("127.0.0.53:53".parse().unwrap())
+        );
+        let r = "resolvers = [\"8.8.8.8\"]";
         for (role, extra, wanted) in [
-            ("entry", "[tunnel.dns]\ndomain = \"t.example.com\"", "needs resolvers"),
-            ("exit", dialer, "for the dialing side"),
-            ("entry", "[tunnel.dns]\ndomain = \"bad_name.com\"\nresolvers = [\"8.8.8.8\"]", "domain"),
-            ("entry", "[tunnel.dns]\ndomain = \"t.example.com\"\nresolvers = [\"dns.google\"]", "not an IP"),
-            ("entry", "[tunnel.dns]\ndomain = \"t.example.com\"\nresolvers = [\"8.8.8.8\"]\nduplicate = 9", "duplicate"),
-            ("entry", "[tunnel.dns]\ndomain = \"t.example.com\"\nresolvers = [\"8.8.8.8\"]\n\n[tunnel.kcp]\nmtu = 1000", "at most 903"),
+            (
+                "entry",
+                "[tunnel.dns]\ndomain = \"t.example.com\"".to_owned(),
+                "needs resolvers",
+            ),
+            ("exit", dialer.to_owned(), "for the dialing side"),
+            (
+                "entry",
+                format!("[tunnel.dns]\ndomain = \"bad_name.com\"\n{r}"),
+                "domain",
+            ),
+            (
+                "entry",
+                format!("[tunnel.dns]\ndomain = []\n{r}"),
+                "1 to 16 domains",
+            ),
+            (
+                "entry",
+                "[tunnel.dns]\ndomain = \"t.example.com\"\nresolvers = [\"dns.google\"]".to_owned(),
+                "not an IP",
+            ),
+            (
+                "entry",
+                "[tunnel.dns]\ndomain = \"t.example.com\"\nresolvers = [\"10.0.0.0/8\"]".to_owned(),
+                "CIDR",
+            ),
+            (
+                "entry",
+                "[tunnel.dns]\ndomain = \"t.example.com\"\nresolvers_file = \"/nonexistent/list\""
+                    .to_owned(),
+                "resolvers_file",
+            ),
+            (
+                "entry",
+                format!("[tunnel.dns]\ndomain = \"t.example.com\"\n{r}\nduplicate = 9"),
+                "duplicate",
+            ),
+            (
+                "entry",
+                format!("[tunnel.dns]\ndomain = \"t.example.com\"\n{r}\nsetup_duplicate = 0"),
+                "setup_duplicate",
+            ),
+            (
+                "entry",
+                format!("[tunnel.dns]\ndomain = \"t.example.com\"\n{r}\nbalance = \"fastest\""),
+                "balance must be one of",
+            ),
+            (
+                "entry",
+                format!("[tunnel.dns]\ndomain = \"t.example.com\"\n{r}\nmax_upload = 900"),
+                "max_upload",
+            ),
+            (
+                "entry",
+                format!("[tunnel.dns]\ndomain = \"t.example.com\"\n{r}\nmin_download = 2000"),
+                "min_download",
+            ),
+            (
+                "entry",
+                format!("[tunnel.dns]\ndomain = \"t.example.com\"\n{r}\nscan_timeout_ms = 5"),
+                "scan_timeout_ms",
+            ),
+            (
+                "entry",
+                format!("[tunnel.dns]\ndomain = \"t.example.com\"\n{r}\nscan_parallel = 0"),
+                "scan_parallel",
+            ),
+            (
+                "entry",
+                format!("[tunnel.dns]\ndomain = \"t.example.com\"\n{r}\nfallback = \"1.1.1.1\""),
+                "for the listening side",
+            ),
+            (
+                "exit",
+                "[tunnel.dns]\ndomain = \"t.example.com\"\nfallback = \"nowhere\"".to_owned(),
+                "fallback",
+            ),
+            (
+                "entry",
+                format!(
+                    "[tunnel.dns]\ndomain = \"t.example.com\"\n{r}\n\n[tunnel.kcp]\nmtu = 1420"
+                ),
+                "at most 1400",
+            ),
         ] {
-            let e = parse_err(&with_transport(role, "dns", extra));
+            let e = parse_err(&with_transport(role, "dns", &extra));
             assert!(e.contains(wanted), "{extra}: {e}");
         }
         let long = format!(

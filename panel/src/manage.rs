@@ -253,13 +253,25 @@ pub fn render(spec: &Spec, token: &str, cert_files: Option<(&Path, &Path)>) -> R
     }
     if let Some(dns) = &spec.dns {
         let mut d = Table::new();
-        d.insert("domain".into(), text(&dns.domain));
+        match dns.domains().as_slice() {
+            [one] => d.insert("domain".into(), text(one)),
+            many => d.insert(
+                "domain".into(),
+                Value::Array(many.iter().map(|m| text(m)).collect()),
+            ),
+        };
         if !dns.resolvers.is_empty() {
             let list = dns.resolvers.iter().map(|r| text(r)).collect();
             d.insert("resolvers".into(), Value::Array(list));
         }
         if let Some(n) = dns.duplicate {
             d.insert("duplicate".into(), Value::Integer(i64::from(n)));
+        }
+        if let Some(balance) = &dns.balance {
+            d.insert("balance".into(), text(balance));
+        }
+        if dns.base64 {
+            d.insert("base64".into(), Value::Boolean(true));
         }
         tunnel.insert("dns".into(), Value::Table(d));
     }
@@ -701,9 +713,11 @@ pub fn get(dir: &Path, name: &str) -> Result<Spec> {
         tls_sni: c.tunnel.tls.as_ref().and_then(|t| t.sni.clone()),
         shadowtls_handshake: c.tunnel.shadowtls.as_ref().map(|s| s.handshake.clone()),
         dns: c.tunnel.dns.as_ref().map(|d| crate::wire::DnsSpec {
-            domain: d.domain.clone(),
+            domain: d.domain.names().join(", "),
             resolvers: d.resolvers.clone(),
             duplicate: Some(d.duplicate),
+            balance: Some(d.balance.clone()),
+            base64: d.base64,
         }),
         multi: c
             .tunnel

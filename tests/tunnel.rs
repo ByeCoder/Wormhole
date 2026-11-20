@@ -2877,8 +2877,8 @@ async fn fake_resolver(listener: u16, drop_every: usize) -> u16 {
 }
 
 /// `dns` through resolvers, the daemons end to end: the exit answers as the domain's
-/// server, the entry sends its queries through two resolvers that lose some, and a TCP
-/// connection crosses both ways.
+/// server, the entry tests its resolvers (one of them dead) and sends its queries through
+/// the two that answer (one loses some), and a TCP connection crosses both ways.
 #[tokio::test]
 async fn a_dns_tunnel_crosses_through_resolvers() {
     let target = echo_server().await;
@@ -2888,6 +2888,9 @@ async fn a_dns_tunnel_crosses_through_resolvers() {
         fake_resolver(tunnel_port, 13).await,
         fake_resolver(tunnel_port, 0).await,
     );
+    let dead = free_port();
+    let saved = std::env::temp_dir().join(format!("wormhole-dns-ok-{tunnel_port}.txt"));
+    let _ = std::fs::remove_file(&saved);
     let exit = format!(
         r#"
         role = "exit"
@@ -2913,8 +2916,11 @@ async fn a_dns_tunnel_crosses_through_resolvers() {
         token = "{TOKEN}"
         [tunnel.dns]
         domain = "t.example.com"
-        resolvers = ["127.0.0.1:{r1}", "127.0.0.1:{r2}"]
-        "#
+        resolvers = ["127.0.0.1:{r1}", "127.0.0.1:{r2}", "127.0.0.1:{dead}"]
+        scan_timeout_ms = 500
+        scan_save = {saved:?}
+        "#,
+        saved = saved.display().to_string()
     );
     let _exit = Side::start(&exit);
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -2925,7 +2931,23 @@ async fn a_dns_tunnel_crosses_through_resolvers() {
         match tokio::time::timeout(Duration::from_secs(30), echo_roundtrip(user_port, &payload))
             .await
         {
-            Ok(Ok(got)) if got == payload => return,
+            Ok(Ok(got)) if got == payload => {
+                // The scan (still waiting on the dead one when the first answered) kept
+                // the two that answer, and saved them.
+                let mut list = String::new();
+                for _ in 0..100 {
+                    if let Ok(text) = std::fs::read_to_string(&saved) {
+                        list = text;
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                let _ = std::fs::remove_file(&saved);
+                assert!(list.contains(&format!("127.0.0.1:{r1}")), "{list}");
+                assert!(list.contains(&format!("127.0.0.1:{r2}")), "{list}");
+                assert!(!list.contains(&format!("127.0.0.1:{dead}")), "{list}");
+                return;
+            }
             other => last = Some(format!("{other:?}").chars().take(200).collect::<String>()),
         }
         tokio::time::sleep(Duration::from_millis(250)).await;

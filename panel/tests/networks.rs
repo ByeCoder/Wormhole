@@ -212,6 +212,8 @@ async fn links_are_made_on_both_servers_reused_undone_and_protected() {
         dns_domain: None,
         dns_resolvers: None,
         dns_duplicate: None,
+        dns_balance: None,
+        dns_base64: None,
         name: "over".into(),
         entry: LOCAL.into(),
         exit: remote.clone(),

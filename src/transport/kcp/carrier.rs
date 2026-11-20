@@ -124,10 +124,11 @@ impl PacketSocket {
     }
 
     /// The dialing side of `dns` through resolvers.
-    pub(crate) async fn dns_resolvers(dns: &super::DnsPath, buffer: usize) -> io::Result<Self> {
-        let client =
-            resolver::Client::start(dns.domain.clone(), &dns.resolvers, dns.duplicate, buffer)
-                .await?;
+    pub(crate) async fn dns_resolvers(
+        pool: Arc<resolver::Pool>,
+        buffer: usize,
+    ) -> io::Result<Self> {
+        let client = resolver::Client::start(pool, buffer).await?;
         Ok(Self {
             local: client.local_addr(),
             peer: Some(client.best()),
@@ -141,7 +142,8 @@ impl PacketSocket {
         dns: &super::DnsPath,
         buffer: usize,
     ) -> io::Result<Self> {
-        let authority = resolver::Authority::start(addr, dns.domain.clone(), buffer).await?;
+        let authority =
+            resolver::Authority::start(addr, dns.domains.clone(), dns.fallback, buffer).await?;
         Ok(Self {
             local: authority.local_addr(),
             peer: None,

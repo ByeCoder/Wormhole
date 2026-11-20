@@ -54,12 +54,18 @@ pub struct PairRequest {
     /// out: the direct `dns`, straight to the other server).
     #[serde(default)]
     pub dns_domain: Option<String>,
-    /// … the resolvers the dialing side queries (`IP` or `IP:port`) …
+    /// … the resolvers the dialing side queries (`IP`, `IP:port`, `CIDR`, `CIDR:port`) …
     #[serde(default)]
     pub dns_resolvers: Option<Vec<String>>,
-    /// … and how many copies of each packet it sends, through as many resolvers (1–4).
+    /// … how many copies of each packet it sends, through as many resolvers (1–4) …
     #[serde(default)]
     pub dns_duplicate: Option<u8>,
+    /// … how it picks the next resolver (`hybrid` if left out) …
+    #[serde(default)]
+    pub dns_balance: Option<String>,
+    /// … and whether answers come in base64.
+    #[serde(default)]
+    pub dns_base64: Option<bool>,
     /// Mux settings, the same on both sides; left out, the profile's apply.
     #[serde(default)]
     pub mux: Option<crate::wire::MuxSpec>,
@@ -535,11 +541,17 @@ impl PairRequest {
         self.transport != "multi" || self.runs("ws") || self.runs("wss")
     }
 
-    /// The domain of a `dns` tunnel through resolvers, if it is one.
+    /// The domains of a `dns` tunnel through resolvers (comma-separated), if it is one.
     fn dns_domain(&self) -> Option<String> {
         self.dns_domain
             .as_deref()
-            .map(|d| d.trim().trim_end_matches('.').to_ascii_lowercase())
+            .map(|d| {
+                d.split(',')
+                    .map(|d| d.trim().trim_end_matches('.').to_ascii_lowercase())
+                    .filter(|d| !d.is_empty())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
             .filter(|d| !d.is_empty() && self.runs("dns"))
     }
 
@@ -554,6 +566,11 @@ impl PairRequest {
                 self.resolvers()
             },
             duplicate: (!accepts).then_some(self.dns_duplicate).flatten(),
+            balance: (!accepts)
+                .then(|| self.dns_balance.clone())
+                .flatten()
+                .filter(|b| !b.is_empty()),
+            base64: !accepts && self.dns_base64.unwrap_or(false),
         })
     }
 
@@ -572,22 +589,31 @@ impl PairRequest {
         let Some(domain) = self.dns_domain() else {
             return Ok(());
         };
-        if wormhole::transport::dns::wire::Domain::parse(&domain).is_err() {
+        let domains: Vec<&str> = domain.split(", ").collect();
+        if domains.len() > 16
+            || domains
+                .iter()
+                .any(|d| wormhole::transport::dns::wire::Domain::parse(d).is_err())
+        {
             bail!("bad_dns_domain");
         }
         let resolvers = self.resolvers();
         if resolvers.is_empty() {
             bail!("dns_needs_resolvers");
         }
-        for r in &resolvers {
-            let ok =
-                r.parse::<std::net::SocketAddr>().is_ok() || r.parse::<std::net::IpAddr>().is_ok();
-            if !ok {
-                bail!("bad_dns_resolver");
-            }
+        let entries = resolvers
+            .iter()
+            .flat_map(|r| wormhole::transport::dns::list::resolver_entries(r));
+        if wormhole::transport::dns::list::expand_resolvers(entries).is_err() {
+            bail!("bad_dns_resolver");
         }
         if self.dns_duplicate.is_some_and(|d| !(1..=4).contains(&d)) {
             bail!("bad_dns_duplicate");
+        }
+        if let Some(b) = self.dns_balance.as_deref().filter(|b| !b.is_empty()) {
+            if wormhole::transport::dns::list::Balance::parse(b).is_none() {
+                bail!("bad_dns_balance");
+            }
         }
         if self.transport == "dns" && !self.listen.ends_with(":53") {
             bail!("dns_port_53");
@@ -1993,6 +2019,8 @@ mod tests {
             dns_domain: None,
             dns_resolvers: None,
             dns_duplicate: None,
+            dns_balance: None,
+            dns_base64: None,
             name: "t".into(),
             entry: entry.into(),
             exit: exit.into(),
@@ -2056,6 +2084,8 @@ mod tests {
             dns_domain: None,
             dns_resolvers: None,
             dns_duplicate: None,
+            dns_balance: None,
+            dns_base64: None,
             name: "t".into(),
             entry: "a".into(),
             exit: "b".into(),
@@ -2180,16 +2210,43 @@ mod tests {
             "direct",
             "0.0.0.0:53",
             Some("T.Example.com."),
-            &["8.8.8.8", "1.1.1.1:53"],
+            &["8.8.8.8", "1.1.1.1:53", "10.9.0.0/30"],
         );
         r.validate().unwrap();
         let (entry, exit) = r.specs(None, None);
         let e = entry.dns.unwrap();
         assert_eq!(e.domain, "t.example.com");
-        assert_eq!(e.resolvers, ["8.8.8.8", "1.1.1.1:53"]);
+        assert_eq!(e.resolvers, ["8.8.8.8", "1.1.1.1:53", "10.9.0.0/30"]);
         assert_eq!(e.duplicate, Some(2));
+        assert!(e.balance.is_none() && !e.base64);
         let x = exit.dns.clone().unwrap();
         assert!(x.resolvers.is_empty() && x.duplicate.is_none());
+        // Several domains, a strategy and base64: the dialing side's, written and read back.
+        let mut r2 = req(
+            "direct",
+            "0.0.0.0:53",
+            Some("t.example.com, U.example.net"),
+            &["8.8.8.8"],
+        );
+        r2.dns_balance = Some("least-loss".into());
+        r2.dns_base64 = Some(true);
+        r2.validate().unwrap();
+        let (entry, exit) = r2.specs(None, None);
+        let e = entry.dns.clone().unwrap();
+        assert_eq!(e.domains(), ["t.example.com", "u.example.net"]);
+        assert_eq!((e.balance.as_deref(), e.base64), (Some("least-loss"), true));
+        assert!(exit.dns.as_ref().unwrap().balance.is_none());
+        let written = crate::manage::render(&entry, &"a".repeat(48), None).unwrap();
+        assert!(
+            written.contains("balance = \"least-loss\"") && written.contains("base64 = true"),
+            "{written}"
+        );
+        assert!(
+            written.contains("domain = [") && written.contains("\"u.example.net\""),
+            "{written}"
+        );
+        r2.dns_balance = Some("fastest".into());
+        assert_eq!(r2.validate().unwrap_err().to_string(), "bad_dns_balance");
         let written = crate::manage::render(&exit, &"a".repeat(48), None).unwrap();
         assert!(
             written.contains("[tunnel.dns]") && written.contains("t.example.com"),
@@ -2287,6 +2344,8 @@ mod tests {
             dns_domain: None,
             dns_resolvers: None,
             dns_duplicate: None,
+            dns_balance: None,
+            dns_base64: None,
             name: "t".into(),
             entry: "a".into(),
             exit: "b".into(),
@@ -2336,6 +2395,8 @@ mod tests {
             dns_domain: None,
             dns_resolvers: None,
             dns_duplicate: None,
+            dns_balance: None,
+            dns_base64: None,
             name: "t".into(),
             entry: "a".into(),
             exit: "b".into(),
@@ -2392,6 +2453,8 @@ mod tests {
             dns_domain: None,
             dns_resolvers: None,
             dns_duplicate: None,
+            dns_balance: None,
+            dns_base64: None,
             name: "t".into(),
             entry: "a".into(),
             exit: "b".into(),
@@ -2481,6 +2544,8 @@ mod tests {
             dns_domain: None,
             dns_resolvers: None,
             dns_duplicate: None,
+            dns_balance: None,
+            dns_base64: None,
             name: "t".into(),
             entry: "a".into(),
             exit: "b".into(),
@@ -2549,6 +2614,8 @@ mod tests {
             dns_domain: None,
             dns_resolvers: None,
             dns_duplicate: None,
+            dns_balance: None,
+            dns_base64: None,
             name: "t".into(),
             entry: "a".into(),
             exit: "b".into(),
@@ -2614,6 +2681,8 @@ mod tests {
             dns_domain: None,
             dns_resolvers: None,
             dns_duplicate: None,
+            dns_balance: None,
+            dns_base64: None,
             name: "t".into(),
             entry: "a".into(),
             exit: "b".into(),

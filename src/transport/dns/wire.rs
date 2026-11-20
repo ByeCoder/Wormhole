@@ -1,5 +1,5 @@
-//! The DNS messages of the resolver path (`[tunnel.dns] resolvers`): what a recursive
-//! resolver will carry between the dialing side and the authoritative listener.
+//! The DNS messages of the resolver path (`[tunnel.dns]`): what a recursive resolver will
+//! carry between the dialing side and the authoritative listener.
 //!
 //! A resolver only forwards what DNS allows, so the two directions differ:
 //!
@@ -7,23 +7,33 @@
 //!  upstream    a TXT query for <data>.<domain>: the data in the query name, base32
 //!              (case-insensitive, as resolvers may change the case), 63-character labels
 //!  downstream  the TXT answer to that query: the data in its character-strings, as is
+//!              (or base64, for resolvers that mangle bytes outside text)
 //! ```
 //!
-//! The data of a query is a small header and one fragment of a packet:
+//! The data of a query is a header and one fragment of a packet:
 //!
 //! ```text
-//!  session  4   the dialing side's random session (one per KCP connection)
+//!  session  4   the dialing side's random session (one per KCP connection); 0: a probe
 //!  nonce    2   a counter, so no two names are the same and no resolver answers from cache
-//!  packet   2   the packet's number in the session
-//!  frag     1   high nibble: this fragment's index; low nibble: the fragment count
-//!               (0: no data, a poll that only gives the listener a way to answer)
-//!  data     …   the fragment
+//!  packet   2   the packet's number in the session (a probe: the answer size it asks for)
+//!  index    1   this fragment's index
+//!  count    1   the packet's fragment count (0: no data, a poll: a way for the listener
+//!               to answer)
+//!  down     1   the most an answer through this resolver may carry, in 8-byte units
+//!               (0: whatever the query's EDNS0 buffer allows)
+//!  flags    1   bit 0: answer in base64
+//!  data     …   the fragment (a probe: 8 bytes to echo, then padding)
 //! ```
 //!
-//! The data of an answer is a flags byte (bit 0: the listener has more waiting) and whole
-//! packets, each with a two-byte length.
+//! The data of an answer is a flags byte (bit 0: the listener has more waiting) and
+//! fragments of packets: length (2), packet number (2), index (1), last (1: 1 for the
+//! packet's last fragment), bytes. Each answer can take a fragment of its own size, as the
+//! resolvers that carry them allow different sizes. A probe's answer is `P`, the 8 bytes it
+//! was sent, and filler up to the size asked for.
 
 use std::io;
+
+use base64::Engine as _;
 
 /// The DNS header: id, flags and the four section counts.
 pub const HEADER: usize = 12;
@@ -35,10 +45,18 @@ pub const EDNS_SIZE: u16 = 1232;
 /// A name's text is at most 253 characters (255 bytes on the wire).
 const MAX_NAME_TEXT: usize = 253;
 const MAX_LABEL: usize = 63;
-/// The query data header: session, nonce, packet and fragment byte.
-pub const QUERY_HEADER: usize = 9;
-/// Fragments per packet: the count is a nibble.
-pub const MAX_FRAGMENTS: usize = 15;
+/// The query data header.
+pub const QUERY_HEADER: usize = 12;
+/// What each fragment of an answer adds: length, packet, index, last.
+pub const ANSWER_FRAGMENT_HEADER: usize = 6;
+/// Fragments per packet, either way.
+pub const MAX_FRAGMENTS: usize = 255;
+/// The bytes a probe echoes.
+pub const PROBE_TOKEN: usize = 8;
+/// Answer flags.
+pub const MORE: u8 = 1;
+/// Query flags.
+pub const BASE64: u8 = 1;
 
 const BASE32: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
 
@@ -48,18 +66,29 @@ pub struct Upstream<'a> {
     pub session: u32,
     pub nonce: u16,
     pub packet: u16,
-    /// This fragment's index, and how many the packet has (0: a poll).
     pub index: u8,
+    /// The fragment count (0: a poll).
     pub count: u8,
+    /// The most an answer may carry, in 8-byte units (0: no limit but the buffer's).
+    pub down: u8,
+    pub flags: u8,
     pub data: &'a [u8],
 }
 
+impl Upstream<'_> {
+    /// A probe: no session, the size of the answer it asks for, and its token.
+    pub fn is_probe(&self) -> bool {
+        self.session == 0
+    }
+}
+
 /// A tunnel domain, as labels, checked once.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Domain {
     labels: Vec<Vec<u8>>,
     /// Its text length (dots between labels, none at the end).
     text: usize,
+    name: String,
 }
 
 impl Domain {
@@ -92,10 +121,14 @@ impl Domain {
                 "too long to leave room for data (at most 200 characters)",
             ));
         }
-        Ok(Self { labels, text })
+        Ok(Self { labels, text, name })
     }
 
-    /// How many bytes of query data fit one name under this domain.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// How many bytes of query data (header included) fit one name under this domain.
     pub fn query_capacity(&self) -> usize {
         // Data characters c, in ceil(c/63) labels, each followed by a dot, then the domain.
         let room = MAX_NAME_TEXT - self.text;
@@ -106,12 +139,7 @@ impl Domain {
         chars * 5 / 8
     }
 
-    /// The bytes of a packet that fit one query, after the header.
-    pub fn fragment_capacity(&self) -> usize {
-        self.query_capacity() - QUERY_HEADER
-    }
-
-    /// The name's labels after the data labels, or `None` if `labels` is not under it.
+    /// The name's labels before the domain, or `None` if `labels` is not under it.
     fn strip<'a>(&self, labels: &'a [Vec<u8>]) -> Option<&'a [Vec<u8>]> {
         let n = labels.len().checked_sub(self.labels.len())?;
         let tail = &labels[n..];
@@ -123,7 +151,8 @@ impl Domain {
 }
 
 /// Writes a TXT query for `up` under `domain`, with an EDNS0 record offering
-/// [`EDNS_SIZE`]: the dialing side's message to a resolver.
+/// [`EDNS_SIZE`]: the dialing side's message to a resolver. Fails if `up` does not fit
+/// the name.
 pub fn encode_query(
     out: &mut Vec<u8>,
     id: u16,
@@ -134,7 +163,10 @@ pub fn encode_query(
     raw.extend_from_slice(&up.session.to_be_bytes());
     raw.extend_from_slice(&up.nonce.to_be_bytes());
     raw.extend_from_slice(&up.packet.to_be_bytes());
-    raw.push((up.index << 4) | (up.count & 0x0f));
+    raw.push(up.index);
+    raw.push(up.count);
+    raw.push(up.down);
+    raw.push(up.flags);
     raw.extend_from_slice(up.data);
     if raw.len() > domain.query_capacity() {
         return Err(io::Error::new(
@@ -186,14 +218,15 @@ pub struct Query<'a> {
     pub rd: bool,
     /// The EDNS0 buffer the asker offers; `None`: no OPT record (512 bytes).
     pub edns: Option<u16>,
-    /// Whether the name is under the tunnel domain, and the data its leading labels decode
-    /// to (`None` for the domain itself, a name it does not decode, or another type).
+    /// Whether the name is under one of the tunnel domains, and the data its leading
+    /// labels decode to (`None` for a domain itself, a name it does not decode, or another
+    /// type).
     pub under: bool,
     pub data: Option<Vec<u8>>,
 }
 
 /// Reads a query for the listener. `None` for anything that is not a one-question query.
-pub fn decode_query<'a>(message: &'a [u8], domain: &Domain) -> Option<Query<'a>> {
+pub fn decode_query<'a>(message: &'a [u8], domains: &[Domain]) -> Option<Query<'a>> {
     if message.len() < HEADER || message[2] & 0x80 != 0 {
         return None;
     }
@@ -230,7 +263,7 @@ pub fn decode_query<'a>(message: &'a [u8], domain: &Domain) -> Option<Query<'a>>
         }
         at = fixed.checked_add(rdlen)?;
     }
-    let data_labels = domain.strip(&labels);
+    let data_labels = domains.iter().find_map(|d| d.strip(&labels));
     let under = data_labels.is_some();
     let data = match data_labels {
         Some(data) if !data.is_empty() && qtype == TYPE_TXT => {
@@ -258,8 +291,7 @@ pub fn parse_upstream(data: &[u8]) -> Option<Upstream<'_>> {
     if data.len() < QUERY_HEADER {
         return None;
     }
-    let frag = data[8];
-    let (index, count) = (frag >> 4, frag & 0x0f);
+    let (index, count) = (data[8], data[9]);
     if count != 0 && index >= count {
         return None;
     }
@@ -269,6 +301,8 @@ pub fn parse_upstream(data: &[u8]) -> Option<Upstream<'_>> {
         packet: u16::from_be_bytes([data[6], data[7]]),
         index,
         count,
+        down: data[10],
+        flags: data[11],
         data: &data[QUERY_HEADER..],
     })
 }
@@ -276,7 +310,7 @@ pub fn parse_upstream(data: &[u8]) -> Option<Upstream<'_>> {
 /// How a listener answers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Answer<'a> {
-    /// A TXT record holding `payload` (the flags byte and packets).
+    /// A TXT record holding `payload` (as is, or base64 when the query asked for it).
     Data(&'a [u8]),
     /// No records: a name of the domain with nothing to say (NOERROR, NODATA).
     Empty,
@@ -284,9 +318,9 @@ pub enum Answer<'a> {
     Refused,
 }
 
-/// The bytes the TXT payload of an answer to `query` may hold: what fits the asker's
-/// buffer after the header, the question, the record and the OPT record.
-pub fn answer_capacity(query: &Query<'_>) -> usize {
+/// The TXT bytes an answer to `query` may hold: what fits the asker's buffer after the
+/// header, the question, the record and the OPT record.
+fn txt_capacity(query: &Query<'_>) -> usize {
     let buffer = usize::from(query.edns.unwrap_or(512).min(EDNS_SIZE));
     let opt = if query.edns.is_some() { 11 } else { 0 };
     let fixed = HEADER + query.question.len() + 12 + opt;
@@ -295,8 +329,29 @@ pub fn answer_capacity(query: &Query<'_>) -> usize {
     room.saturating_sub(room.div_ceil(256))
 }
 
-/// Writes the listener's answer to `query`.
-pub fn encode_answer(out: &mut Vec<u8>, query: &Query<'_>, answer: Answer<'_>) {
+/// The payload an answer to `query` may carry, before any base64: the buffer's room, and
+/// no more than the dialing side asked for (`down`, a resolver's measured size).
+pub fn answer_capacity(query: &Query<'_>, down: u8, base64: bool) -> usize {
+    let mut cap = txt_capacity(query);
+    if base64 {
+        cap = cap / 4 * 3;
+    }
+    if down > 0 {
+        cap = cap.min(usize::from(down) * 8);
+    }
+    cap
+}
+
+/// Writes the listener's answer to `query`, its payload in base64 if `base64`.
+pub fn encode_answer(out: &mut Vec<u8>, query: &Query<'_>, answer: Answer<'_>, base64: bool) {
+    let encoded;
+    let answer = match answer {
+        Answer::Data(payload) if base64 => {
+            encoded = base64::engine::general_purpose::STANDARD_NO_PAD.encode(payload);
+            Answer::Data(encoded.as_bytes())
+        }
+        other => other,
+    };
     out.clear();
     out.extend_from_slice(&query.id.to_be_bytes());
     // QR, AA (the listener is the domain's server), RD echoed; the rcode last.
@@ -335,7 +390,10 @@ pub struct Response {
     pub id: u16,
     /// The DNS rcode (0: no error).
     pub rcode: u8,
-    /// The TXT payload of the first TXT answer, its strings joined.
+    /// Whether the resolver cut the answer short (TC).
+    pub truncated: bool,
+    /// The TXT payload of the first TXT answer, its strings joined (still base64 if it
+    /// was asked so).
     pub payload: Option<Vec<u8>>,
 }
 
@@ -345,6 +403,7 @@ pub fn decode_response(message: &[u8]) -> Option<Response> {
         return None;
     }
     let id = u16::from_be_bytes([message[0], message[1]]);
+    let truncated = message[2] & 0x02 != 0;
     let rcode = message[3] & 0x0f;
     let qdcount = u16::from_be_bytes([message[4], message[5]]);
     let ancount = u16::from_be_bytes([message[6], message[7]]);
@@ -381,7 +440,76 @@ pub fn decode_response(message: &[u8]) -> Option<Response> {
         }
         at = end;
     }
-    Some(Response { id, rcode, payload })
+    Some(Response {
+        id,
+        rcode,
+        truncated,
+        payload,
+    })
+}
+
+/// The payload of an answer, decoded from base64 if it was asked so.
+pub fn answer_payload(payload: Vec<u8>, base64: bool) -> Option<Vec<u8>> {
+    if base64 {
+        base64::engine::general_purpose::STANDARD_NO_PAD
+            .decode(payload.trim_ascii())
+            .ok()
+    } else {
+        Some(payload)
+    }
+}
+
+/// One fragment of a packet in an answer.
+#[derive(Debug, PartialEq, Eq)]
+pub struct DownFragment<'a> {
+    pub packet: u16,
+    pub index: u8,
+    /// Whether it is the packet's last fragment.
+    pub last: bool,
+    pub data: &'a [u8],
+}
+
+/// Appends a fragment to an answer payload.
+pub fn push_fragment(payload: &mut Vec<u8>, f: &DownFragment<'_>) {
+    payload.extend_from_slice(&(f.data.len() as u16).to_be_bytes());
+    payload.extend_from_slice(&f.packet.to_be_bytes());
+    payload.push(f.index);
+    payload.push(u8::from(f.last));
+    payload.extend_from_slice(f.data);
+}
+
+/// The flags and fragments of an answer payload.
+pub fn read_fragments(payload: &[u8]) -> Option<(u8, Vec<DownFragment<'_>>)> {
+    let (&flags, mut rest) = payload.split_first()?;
+    let mut out = Vec::new();
+    while rest.len() >= ANSWER_FRAGMENT_HEADER {
+        let len = usize::from(u16::from_be_bytes([rest[0], rest[1]]));
+        let data = rest.get(ANSWER_FRAGMENT_HEADER..ANSWER_FRAGMENT_HEADER + len)?;
+        if rest[5] > 1 {
+            return None;
+        }
+        out.push(DownFragment {
+            packet: u16::from_be_bytes([rest[2], rest[3]]),
+            index: rest[4],
+            last: rest[5] == 1,
+            data,
+        });
+        rest = &rest[ANSWER_FRAGMENT_HEADER + len..];
+    }
+    Some((flags, out))
+}
+
+/// The answer payload of a probe: `P`, its token, and filler up to `size` bytes.
+pub fn probe_answer(token: &[u8], size: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(size.max(1 + PROBE_TOKEN));
+    out.push(b'P');
+    out.extend_from_slice(&token[..PROBE_TOKEN.min(token.len())]);
+    let mut x = 0x5Au8;
+    while out.len() < size {
+        out.push(x);
+        x = x.wrapping_mul(31).wrapping_add(7);
+    }
+    out
 }
 
 /// Reads the name at `at`, following compression pointers: its labels, and the offset
@@ -466,8 +594,24 @@ fn unbase32(text: &[u8]) -> Option<Vec<u8>> {
 mod tests {
     use super::*;
 
-    fn domain() -> Domain {
-        Domain::parse("t.example.com").unwrap()
+    fn domains() -> Vec<Domain> {
+        vec![
+            Domain::parse("t.example.com").unwrap(),
+            Domain::parse("x.other.org").unwrap(),
+        ]
+    }
+
+    fn up(data: &[u8]) -> Upstream<'_> {
+        Upstream {
+            session: 0xDEAD_BEEF,
+            nonce: 7,
+            packet: 300,
+            index: 2,
+            count: 5,
+            down: 40,
+            flags: BASE64,
+            data,
+        }
     }
 
     #[test]
@@ -484,107 +628,101 @@ mod tests {
     }
 
     #[test]
-    fn a_query_carries_its_fragment_and_fills_the_name() {
-        let d = domain();
-        let cap = d.fragment_capacity();
-        assert!(cap > 120, "{cap}");
-        let data = vec![0xA5u8; cap];
-        let up = Upstream {
-            session: 0xDEAD_BEEF,
-            nonce: 7,
-            packet: 300,
-            index: 2,
-            count: 5,
-            data: &data,
-        };
-        let mut out = Vec::new();
-        encode_query(&mut out, 0x4242, &d, &up).unwrap();
-        let q = decode_query(&out, &d).unwrap();
-        assert_eq!(
-            (q.id, q.qtype, q.rd, q.edns),
-            (0x4242, TYPE_TXT, true, Some(EDNS_SIZE))
-        );
-        assert!(q.under);
-        let raw = q.data.unwrap();
-        assert_eq!(parse_upstream(&raw).unwrap(), up);
-        // One byte more does not fit.
-        let more = vec![0u8; cap + 1];
-        assert!(encode_query(&mut out, 1, &d, &Upstream { data: &more, ..up }).is_err());
+    fn a_query_carries_its_fragment_under_any_of_the_domains() {
+        for d in &domains() {
+            let cap = d.query_capacity() - QUERY_HEADER;
+            assert!(cap > 120, "{cap}");
+            let data = vec![0xA5u8; cap];
+            let mut out = Vec::new();
+            encode_query(&mut out, 0x4242, d, &up(&data)).unwrap();
+            let q = decode_query(&out, &domains()).unwrap();
+            assert_eq!(
+                (q.id, q.qtype, q.rd, q.edns),
+                (0x4242, TYPE_TXT, true, Some(EDNS_SIZE))
+            );
+            assert!(q.under);
+            assert_eq!(parse_upstream(&q.data.unwrap()).unwrap(), up(&data));
+            // One byte more does not fit.
+            let more = vec![0u8; cap + 1];
+            assert!(encode_query(&mut out, 1, d, &up(&more)).is_err());
+        }
     }
 
     #[test]
-    fn names_outside_or_of_the_domain_carry_no_data() {
-        let d = domain();
+    fn names_outside_the_domains_carry_no_data() {
         let mut out = Vec::new();
-        encode_query(
-            &mut out,
-            1,
-            &Domain::parse("other.net").unwrap(),
-            &Upstream {
-                session: 1,
-                nonce: 1,
-                packet: 1,
-                index: 0,
-                count: 0,
-                data: &[],
-            },
-        )
-        .unwrap();
-        let q = decode_query(&out, &d).unwrap();
+        encode_query(&mut out, 1, &Domain::parse("nope.net").unwrap(), &up(&[])).unwrap();
+        let q = decode_query(&out, &domains()).unwrap();
         assert!(!q.under && q.data.is_none());
     }
 
     #[test]
-    fn an_answer_round_trips_and_fits_the_buffer() {
-        let d = domain();
+    fn answers_carry_fragments_as_is_or_in_base64_and_fit() {
+        let ds = domains();
         let mut query = Vec::new();
-        let up = Upstream {
-            session: 9,
-            nonce: 1,
-            packet: 0,
-            index: 0,
-            count: 0,
-            data: &[],
-        };
-        encode_query(&mut query, 77, &d, &up).unwrap();
-        let q = decode_query(&query, &d).unwrap();
-        let cap = answer_capacity(&q);
-        let payload = vec![0x5Au8; cap];
+        encode_query(&mut query, 77, &ds[0], &up(&[])).unwrap();
+        let q = decode_query(&query, &ds).unwrap();
+        for base64 in [false, true] {
+            let cap = answer_capacity(&q, 0, base64);
+            let mut payload = vec![MORE];
+            let data = vec![0x5Au8; cap - 1 - ANSWER_FRAGMENT_HEADER];
+            push_fragment(
+                &mut payload,
+                &DownFragment {
+                    packet: 9,
+                    index: 1,
+                    last: true,
+                    data: &data,
+                },
+            );
+            assert_eq!(payload.len(), cap);
+            let mut out = Vec::new();
+            encode_answer(&mut out, &q, Answer::Data(&payload), base64);
+            assert!(out.len() <= usize::from(EDNS_SIZE), "{}", out.len());
+            let r = decode_response(&out).unwrap();
+            assert_eq!((r.id, r.rcode, r.truncated), (77, 0, false));
+            let got = answer_payload(r.payload.unwrap(), base64).unwrap();
+            let (flags, frags) = read_fragments(&got).unwrap();
+            assert_eq!(flags, MORE);
+            assert_eq!(
+                frags,
+                [DownFragment {
+                    packet: 9,
+                    index: 1,
+                    last: true,
+                    data: &data
+                }]
+            );
+        }
+        // A resolver's measured size caps it.
+        assert_eq!(answer_capacity(&q, 40, false), 320);
         let mut out = Vec::new();
-        encode_answer(&mut out, &q, Answer::Data(&payload));
-        assert!(
-            out.len() <= usize::from(EDNS_SIZE),
-            "{} > {}",
-            out.len(),
-            EDNS_SIZE
-        );
-        let r = decode_response(&out).unwrap();
-        assert_eq!((r.id, r.rcode), (77, 0));
-        assert_eq!(r.payload.unwrap(), payload);
-        encode_answer(&mut out, &q, Answer::Empty);
-        let r = decode_response(&out).unwrap();
-        assert!(r.payload.is_none() && r.rcode == 0);
-        encode_answer(&mut out, &q, Answer::Refused);
+        encode_answer(&mut out, &q, Answer::Empty, false);
+        assert!(decode_response(&out).unwrap().payload.is_none());
+        encode_answer(&mut out, &q, Answer::Refused, false);
         assert_eq!(decode_response(&out).unwrap().rcode, 5);
     }
 
     #[test]
+    fn a_probe_answer_echoes_its_token() {
+        let a = probe_answer(b"12345678", 300);
+        assert_eq!(a.len(), 300);
+        assert_eq!(&a[..9], b"P12345678");
+    }
+
+    #[test]
     fn junk_is_not_a_query() {
-        let d = domain();
-        assert!(decode_query(b"", &d).is_none());
-        assert!(decode_query(&[0u8; 11], &d).is_none());
+        let ds = domains();
+        assert!(decode_query(b"", &ds).is_none());
+        assert!(decode_query(&[0u8; 11], &ds).is_none());
         let mut out = Vec::new();
-        let up = Upstream {
-            session: 9,
-            nonce: 1,
-            packet: 0,
-            index: 0,
-            count: 0,
-            data: &[],
-        };
-        encode_query(&mut out, 1, &d, &up).unwrap();
-        assert!(decode_query(&out[..out.len() - 15], &d).is_none());
+        encode_query(&mut out, 1, &ds[0], &up(&[])).unwrap();
+        assert!(decode_query(&out[..out.len() - 15], &ds).is_none());
         assert!(decode_response(&out).is_none(), "a query is not a response");
+        assert!(
+            read_fragments(&[0, 0, 1, 0, 1, 0, 7, 9]).is_none(),
+            "bad last byte"
+        );
     }
 
     #[test]
@@ -593,6 +731,9 @@ mod tests {
         assert!(Domain::parse("a..b").is_err());
         assert!(Domain::parse("bad_name.com").is_err());
         assert!(Domain::parse(&"a".repeat(201)).is_err());
-        assert!(Domain::parse("T.Example.COM.").is_ok());
+        assert_eq!(
+            Domain::parse("T.Example.COM.").unwrap().name(),
+            "t.example.com"
+        );
     }
 }

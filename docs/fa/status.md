@@ -111,6 +111,7 @@ daemon -> client   ---\n<JSON document>\n
 | `streams`، `streams_max` | با mux: streamهای باز روی همهٔ sessionهای زنده، و این sessionها روی هم چندتا را می‌برند (هرکدام `mux.max_streams`؛ sessionی که در حال جایگزینی است چیزی نمی‌برد). بدون mux برابر `null` |
 | `full` | اتصال‌ها و جریان‌های تازه‌ای که رد شدند چون همهٔ sessionها پر بودند (سمت ورودی) |
 | `by_transport` | تونل `auto` یا `multi` (1.2.2): برای هر ترنسپورتی که رویش کار کرده یک مورد — `transport`، `sessions` زنده، `streams_open` همین حالا و `streams_total` از شروع تونل، بایت‌های `bytes_sent` و `bytes_received` این سمت، و `rtt_ms`. برای بقیهٔ ترنسپورت‌ها نمی‌آید. پنل آن را در صفحهٔ تونل، بخش «به تفکیک ترنسپورت» نشان می‌دهد |
+| `dns_resolvers` | `dns` از راه resolverها، سمت شماره‌گیر (1.2.5): برای هر resolver یک مورد، آن‌هایی که در کارند اول (حداکثر ۶۴) — `addr`، `state` (`active`، `testing`، `off`: پس از افت کنار گذاشته، `dead`: از آزمونش رد نشد؛ این دو هر از گاهی دوباره آزموده می‌شوند)، `rtt_ms`، کوئری‌های `sent` و `answered`، و بایت‌های `upload` و `download` که رد می‌کند. در بقیهٔ حالت‌ها نمی‌آید. پنل آن را در صفحهٔ تونل، بخش «Resolverهای DNS» نشان می‌دهد |
 
 ### `totals` و `forwards`
 

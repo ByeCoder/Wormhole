@@ -287,8 +287,12 @@ test.describe("the tunnel", () => {
     await page.locator("#wz-dns-domain").fill("t.example.com");
     await page.locator("#wz-dns-resolvers").fill("8.8.8.8, dns.google");
     await next(page);
-    await expect(page.getByText("A resolver is an IP or IP:port").first()).toBeVisible();
-    await page.locator("#wz-dns-resolvers").fill("8.8.8.8, 1.1.1.1:53");
+    await expect(page.getByText("A resolver is an IP, IP:port or a range").first()).toBeVisible();
+    // a range, several domains, a way of picking them and base64 answers
+    await page.locator("#wz-dns-resolvers").fill("8.8.8.8, 1.1.1.1:53\n10.10.0.0/24");
+    await page.locator("#wz-dns-domain").fill("t.example.com, u.example.net");
+    await page.locator("#wz-dns-balance").selectOption("least-loss");
+    await page.getByLabel("Answers in base64").check();
     await next(page);
     // resolvers ask on port 53
     await expect(page.locator("#wz-port")).toHaveValue("53");
